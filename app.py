@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import align
@@ -36,6 +36,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+VERSION = "v6"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 
 ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus",
                 ".webm", ".mp4", ".mov", ".mpeg", ".mpga", ".oga"}
@@ -132,6 +133,7 @@ def _recover_stuck_songs():
 
 @asynccontextmanager
 async def lifespan(app):
+    store.init()          # memoria desde disco + GitHub (rápido, sin red en lecturas)
     _recover_stuck_songs()
     yield
 
@@ -139,17 +141,33 @@ async def lifespan(app):
 app = FastAPI(title="Resuena", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def no_store_cache(request, call_next):
+    """Sin caché: el navegador SIEMPRE baja la versión nueva de la página.
+    (Evita que quede cacheado un index.html viejo después de un deploy.)"""
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request, exc):
+    """Nunca devolver un 500 con traceback crudo: JSON limpio y genérico."""
+    return JSONResponse(status_code=500, content={"detail": "Error interno del servidor. Reintentá."})
+
+
 def _ensure_audio(sid):
-    """Asegura que el mp3 de la canción exista en disco (lo baja del backend externo si hace falta)."""
+    """Asegura que el mp3 de la canción exista en disco (lo baja del backend
+    externo si hace falta o si quedó vacío por una descarga fallida)."""
     f = AUDIO_DIR / f"{sid}.mp3"
-    if not f.exists() and media.persistent():
+    if (not f.exists() or f.stat().st_size == 0) and media.persistent():
         media.get_file(f"song/{sid}.mp3", str(f))
     return f
 
 
 def _ensure_render(sid, fname):
     f = RENDER_DIR / f"{sid}_{fname}"
-    if not f.exists() and media.persistent():
+    if (not f.exists() or f.stat().st_size == 0) and media.persistent():
         media.get_file(f"render/{sid}/{fname}", str(f))
     return f
 
@@ -167,7 +185,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/api/health")
 def health():
     storage = "github" if ghstore.enabled() else ("r2" if cloud.cloud_enabled() else "local")
-    return {"ok": True, "model": WHISPER_MODEL, "storage": storage}
+    return {"ok": True, "model": WHISPER_MODEL, "storage": storage, "version": VERSION}
 
 
 @app.get("/api/songs")
@@ -256,7 +274,7 @@ async def create_song(
     except Exception as e:
         raise HTTPException(400, f"No se pudo guardar el archivo: {e}")
 
-    store.save_song(sid, song)
+    store.save_song(sid, song, durable=True)
     process_song(sid)
     return {"id": sid}
 
@@ -283,8 +301,12 @@ def song_audio(sid: str):
     if not store.get_song(sid):
         raise HTTPException(404, "Canción no encontrada")
     f = _ensure_audio(sid)
-    if not f.exists():
-        raise HTTPException(404, "El audio todavía no está listo")
+    if not f.exists() or f.stat().st_size == 0:
+        raise HTTPException(
+            404,
+            "El audio de la canción no está disponible (el servidor se reinició). "
+            "Volvé a abrir la canción para recuperarlo, o subila de nuevo.",
+        )
     return FileResponse(str(f), media_type="audio/mpeg")
 
 
@@ -450,11 +472,10 @@ def render(sid: str, payload: dict):
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
         au.render_phrases(str(_ensure_audio(sid)), segments, str(out))
-        if media.persistent():
-            ok = media.put_file(f"render/{sid}/{fname}", str(out))
-            if not ok:
-                raise HTTPException(500, "No se pudo guardar el audio en la nube")
-        _prune_renders(sid)
+        # subir a la nube en segundo plano: el GET sirve desde disco y no
+        # bloquea el POST (GitHub puede tardar segundos con archivos grandes)
+        threading.Thread(target=_upload_render_safe,
+                         args=(sid, fname, str(out)), daemon=True).start()
     return {
         "url": f"/api/songs/{sid}/render/{fname}",
         "segments": len(segments),
@@ -464,13 +485,27 @@ def render(sid: str, payload: dict):
     }
 
 
+def _upload_render_safe(sid, fname, local_path):
+    """Sube el render a la nube y poda los renders viejos. Nunca lanza."""
+    try:
+        if media.persistent():
+            media.put_file(f"render/{sid}/{fname}", local_path)
+            _prune_renders(sid)
+    except Exception:
+        pass
+
+
 @app.get("/api/songs/{sid}/render/{fname}")
 def render_file(sid: str, fname: str):
     if not re.fullmatch(r"[0-9a-f]{8}_[0-9a-f]{8}\.mp3", fname):
         raise HTTPException(404, "Audio no encontrado")
     f = _ensure_render(sid, fname)
-    if not f.exists():
-        raise HTTPException(404, "Audio no encontrado")
+    if not f.exists() or f.stat().st_size == 0:
+        raise HTTPException(
+            404,
+            "El audio se perdió (el servidor se reinició). "
+            "Tocá de nuevo \"Generar audio con mis frases\".",
+        )
     return FileResponse(str(f), media_type="audio/mpeg",
                         headers={"Cache-Control": "no-store"},
                         filename=f"frases_{sid}.mp3")
@@ -562,13 +597,13 @@ def _process_song_impl(sid):
         song["transcript_words"] = words
         song["status"] = "ready"
         song["phase"] = "listo"
-        store.save_song(sid, song)
+        store.save_song(sid, song, durable=True)
     except Exception as e:
         song = store.get_song(sid)
         song["status"] = "error"
         song["error"] = str(e)[:500]
         song["phase"] = None
-        store.save_song(sid, song)
+        store.save_song(sid, song, durable=True)
 
 
 if __name__ == "__main__":
