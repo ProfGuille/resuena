@@ -35,8 +35,8 @@ RENDER_DIR = DATA_DIR / "render"
 for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
-VERSION = "v9"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
+VERSION = "v10"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
 
@@ -47,32 +47,44 @@ _model = None
 _model_lock = threading.Lock()
 
 
-def _pick_model():
-    """Elige el modelo de Whisper que quepa en la RAM disponible.
+def _container_mem_mb():
+    """RAM REAL disponible para ESTE contenedor.
 
-    Render free tiene SOLO 512 MB: el modelo 'small' necesita ~500 MB-1 GB y
-    mata el proceso (OOM) a mitad de la transcripción -> crash loop. Por eso,
-    si hay poca RAM, se baja automáticamente a un modelo que sí quepa:
-      - MemTotal < 1400 MB  -> 'small' se baja a 'base' (cabe ~150 MB)
-      - MemTotal < 700 MB   -> 'base' se baja a 'tiny' (cabe ~75 MB)
+    Render free limita a 512 MB vía cgroup. /proc/meminfo reporta la RAM del
+    HOST (no la del contenedor), así que hay que leer el límite del cgroup:
+      - cgroup v2: /sys/fs/cgroup/memory.max
+      - cgroup v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
+    Devuelve None si no se puede determinar (se asume lo peor: 512 MB).
     """
-    requested = os.environ.get("WHISPER_MODEL", "base")
-    mem_mb = None
-    try:
-        with open("/proc/meminfo") as fh:
-            for line in fh:
-                if line.startswith("MemTotal:"):
-                    mem_mb = int(line.split()[1]) // 1024
-                    break
-    except Exception:
-        pass
-    if mem_mb is not None:
-        if mem_mb < 700 and requested != "tiny":
-            print(f"RAM baja ({mem_mb} MB): bajando modelo {requested} -> tiny", flush=True)
-            return "tiny"
-        if mem_mb < 1400 and requested == "small":
-            print(f"RAM baja ({mem_mb} MB): bajando modelo small -> base", flush=True)
-            return "base"
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as fh:
+                v = fh.read().strip()
+            if v and v != "max":
+                return int(v) // (1024 * 1024)
+        except Exception:
+            continue
+    return None
+
+
+def _pick_model():
+    """Elige el modelo de Whisper que quepa en la RAM REAL del contenedor.
+
+    Render free = 512 MB. 'small' (~1 GB) o 'base' (~500 MB con la app)
+    causan OOM y matan el proceso a mitad de la transcripción. Regla segura:
+      - RAM < 900 MB (o desconocida) -> SIEMPRE 'tiny' (~75 MB), sin importar
+        lo que pida la variable de entorno.
+      - RAM >= 900 MB -> respeta lo pedido.
+    """
+    requested = os.environ.get("WHISPER_MODEL", "tiny")
+    mem_mb = _container_mem_mb()
+    if mem_mb is None:
+        print("RAM del contenedor desconocida: usando tiny (seguro)", flush=True)
+        return "tiny"
+    if mem_mb < 900 and requested != "tiny":
+        print(f"RAM del contenedor: {mem_mb} MB -> usando tiny (cabe en 512 MB)", flush=True)
+        return "tiny"
     return requested
 
 
@@ -141,13 +153,27 @@ def _upload_src_safe(sid, src_path, ext):
         pass
 
 
+MAX_RETRIES = 3
+
 def _recover_stuck_songs():
     """Al arrancar: canciones que quedaron 'processing' por un reinicio.
-    Se re-encolan en la cola de análisis (una por vez); las que no tienen
-    cómo retomarse se marcan con un mensaje claro."""
+    Se re-encolan en la cola de análisis (una por vez) PERO con un límite de
+    reintentos: si el servidor se reinició varias veces seguidas (p.ej. OOM
+    por RAM en el plan free), se marca error claro en vez de quedar en loop
+    infinito de reintentos."""
     try:
         for sid, song in store.all_songs().items():
             if song.get("status") != "processing":
+                continue
+            retries = song.get("retry_count", 0) + 1
+            song["retry_count"] = retries
+            if retries > MAX_RETRIES:
+                song["status"] = "error"
+                song["error"] = ("El análisis se interrumpió varias veces (el servidor "
+                                 "del plan free se reinicia cuando se queda sin memoria). "
+                                 "Borrá la canción y volvé a subirla, o intentá más tarde.")
+                song["phase"] = None
+                store.save_song(sid, song, durable=True)
                 continue
             if song.get("source") == "youtube":
                 process_song(sid)
@@ -177,6 +203,8 @@ def _recheck_align():
     try:
         for sid, song in store.all_songs().items():
             if song.get("status") == "ready" and song.get("align_v") != ALIGN_VERSION:
+                if song.get("retry_count", 0) > MAX_RETRIES:
+                    continue  # ya se intentó demasiadas veces: no reintentar
                 song["status"] = "processing"
                 song["phase"] = "encolado"
                 song["error"] = None
