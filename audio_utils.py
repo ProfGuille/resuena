@@ -56,15 +56,24 @@ def download_youtube(url, dst_dir, song_id):
         ImpersonateTarget = None
 
     outtmpl = os.path.join(str(dst_dir), f"{song_id}.%(ext)s")
+    # Estrategias de descarga de YouTube. Sin la librería curl_cffi (que sí
+    # está en requirements.txt), YouTube devuelve 403 a IPs de datacenter
+    # (Render). Con curl_cffi, yt-dlp puede imitar un navegador real y pasa.
+    # Se prueban en orden: las impersonadas primero (más confiables), luego
+    # los clientes móviles/tv (menos bloqueados), y al final web pelado.
     strategies = [
-        {"name": "web",        "clients": ["web"],          "fmt": "bestaudio/best"},
-        {"name": "android",    "clients": ["android"],      "fmt": "bestaudio[ext=m4a]/bestaudio/best"},
-        {"name": "android-v",  "clients": ["android"],      "fmt": "best"},
-        {"name": "tv",         "clients": ["tv"],           "fmt": "bestaudio/best"},
-        {"name": "mweb",       "clients": ["mweb"],         "fmt": "bestaudio[ext=m4a]/bestaudio/best"},
-        {"name": "web-imp",    "clients": ["web"],          "fmt": "bestaudio/best", "impersonate": "chrome"},
-        {"name": "web-imp-v",  "clients": ["web"],          "fmt": "best",           "impersonate": "chrome"},
-        {"name": "safari-imp", "clients": ["web_safari"],   "fmt": "bestaudio/best", "impersonate": "safari"},
+        {"name": "web-imp",       "clients": ["web"],           "fmt": "bestaudio/best", "impersonate": "chrome"},
+        {"name": "web-imp-v",     "clients": ["web"],           "fmt": "best",           "impersonate": "chrome"},
+        {"name": "safari-imp",    "clients": ["web_safari"],    "fmt": "bestaudio/best", "impersonate": "safari"},
+        {"name": "mweb-imp",      "clients": ["mweb"],          "fmt": "bestaudio[ext=m4a]/bestaudio/best", "impersonate": "chrome"},
+        {"name": "android",       "clients": ["android"],       "fmt": "bestaudio[ext=m4a]/bestaudio/best"},
+        {"name": "android-v",     "clients": ["android"],       "fmt": "best"},
+        {"name": "android_vr",    "clients": ["android_vr"],    "fmt": "bestaudio/best"},
+        {"name": "ios",           "clients": ["ios"],           "fmt": "bestaudio/best"},
+        {"name": "tv",            "clients": ["tv"],            "fmt": "bestaudio/best"},
+        {"name": "tv_embedded",   "clients": ["tv_embedded"],   "fmt": "bestaudio/best"},
+        {"name": "web_embedded",  "clients": ["web_embedded"],  "fmt": "bestaudio/best"},
+        {"name": "web",           "clients": ["web"],           "fmt": "bestaudio/best"},
     ]
 
     def _cleanup():

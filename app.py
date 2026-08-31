@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v13"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v14"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -849,9 +849,14 @@ def _process_song_impl(sid):
         song["align_v"] = ALIGN_VERSION
         song["status"] = "ready"
         song["phase"] = "listo"
-        store.save_song(sid, song, durable=True)
+        # si el usuario borró la canción mientras se procesaba, NO volver a
+        # crearla (antes se resucitaba sola al terminar el worker)
+        if store.get_song(sid) is not None:
+            store.save_song(sid, song, durable=True)
     except Exception as e:
         song = store.get_song(sid)
+        if song is None:
+            return  # fue borrada mientras se procesaba: no resucitar
         song["status"] = "error"
         song["error"] = str(e)[:500]
         song["phase"] = None
