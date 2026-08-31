@@ -311,7 +311,7 @@
   </div>
 </section>
 
-<footer>Resuena · las frases que te resuenan · procesamiento con <b>faster-whisper</b> + <b>ffmpeg</b> (todo gratuito)</footer>
+<footer>Resuena · las frases que te resuenan · procesamiento con <b>faster-whisper</b> + <b>ffmpeg</b> (todo gratuito)<br><span id="storageInfo"></span></footer>
 
 <!-- ===================== MODAL SUBIR ===================== -->
 <div class="overlay" id="uploadOv">
@@ -395,6 +395,24 @@ async function api(path, opts){
   return r.json();
 }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* indicador de dónde se guardan los datos (persistencia) */
+async function loadStorageInfo(){
+  try {
+    const h = await api('/api/health');
+    const el = $('storageInfo');
+    if (h.storage === 'github'){
+      el.textContent = '💾 Canciones guardadas en GitHub — persisten aunque el servidor se reinicie.';
+      el.style.color = '';
+    } else if (h.storage === 'r2'){
+      el.textContent = '💾 Canciones guardadas en la nube — persisten aunque el servidor se reinicie.';
+      el.style.color = '';
+    } else {
+      el.textContent = '⚠ Almacenamiento local: las canciones se pierden al reiniciar. Configurá GITHUB_TOKEN y GITHUB_REPO en Render para que persistan.';
+      el.style.color = '#ffb3b3';
+    }
+  } catch(e){}
+}
 
 /* ============================================================ vistas */
 function showLib(){
@@ -889,6 +907,7 @@ async function shareSongId(id){
 
 /* ============================================================ init */
 (function init(){
+  loadStorageInfo();
   const sp = new URLSearchParams(location.search);
   const sidParam = sp.get('song');
   if (sidParam){
