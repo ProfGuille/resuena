@@ -707,6 +707,13 @@ selAudio.addEventListener('timeupdate', () => {
   $('curTime').textContent = fmt(selAudio.currentTime);
 });
 selAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(selAudio.duration); });
+selAudio.addEventListener('error', () => {
+  if (state.selUrl){
+    const w = $('renderWarn');
+    w.textContent = 'El audio anterior se perdió (el servidor se durmió o se actualizó). Tocá de nuevo "Generar audio con mis frases".';
+    w.style.display = '';
+  }
+});
 
 function setupFullAudio(){
   fullAudio.pause(); fullAudio.src = '';

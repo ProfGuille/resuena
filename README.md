@@ -81,28 +81,40 @@ Tenés dos opciones:
 - Al terminar te da una URL tipo **`https://resuena.onrender.com`** → esa es tu
   app online. Se puede abrir desde cualquier dispositivo con el link.
 
-### Paso 5 (recomendado): disco persistente
+### Paso 5 (recomendado): persistencia gratis, SIN tarjeta (GitHub)
 
-En el plan free, Render se "duerme" a los 15 min de inactividad y los archivos
-se borran al redeployar. Para que la biblioteca de canciones **sobreviva**:
+El plan **free de Render no incluye discos** y sin persistencia las canciones se
+borran cuando el servicio se reinicia (lo viste en los logs: la canción que
+subiste pasó de `200` a `404` después de un reinicio). La solución **gratis y
+sin tarjeta** es usar tu repo de GitHub como almacenamiento: la app guarda
+canciones, selecciones y audios como archivos dentro del repo.
 
-1. En el servicio de Render → pestaña **Disks** → **Add Disk**.
-2. Tamaño: **1 GB** (gratis) → Mount path: **`/var/data`** → Save.
-3. Luego en **Environment** agregá la variable:
-   - `DATA_DIR` = `/var/data`
+1. Creá un **token** de GitHub (2 minutos, sin tarjeta):
+   - [github.com/settings/tokens](https://github.com/settings/tokens) →
+     **Generate new token** → **Fine-grained personal access token**.
+   - **Repository access**: *Only select repositories* → elegí `resuena`.
+   - **Permissions → Repository permissions**: `Contents` = **Read and write**.
+   - **Generate token** → copiá el token (empieza con `github_pat_…`, se muestra
+     una sola vez).
+2. En Render → tu servicio → **Environment** → agregá dos variables:
+   - `GITHUB_TOKEN` = el token que copiaste
+   - `GITHUB_REPO` = `TU_USUARIO/resuena` (ej: `juan/resuena`)
+3. **Save Changes** → **Manual Deploy → Deploy latest commit**.
 
-Con eso las canciones, transcripciones y renders quedan guardados en el disco.
+Desde ese momento, todo lo que se sube queda guardado en el repo: aunque Render
+se duerma, se reinicie o se redeploye, **las canciones siguen ahí**.
 
-> Nota: con el plan free la transcripción es lenta al principio (el modelo se
-> descarga al primer uso). Si querés más velocidad a costa de algo de precisión,
-> agregá la variable `WHISPER_MODEL=tiny`.
+> ¿Preferís Cloudflare R2? También está soportado (mismo mecanismo) si algún
+> día querés usar esa vía: variables `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`,
+> `R2_SECRET_KEY`, `R2_BUCKET`. Pero la activación de R2 pide tarjeta (aunque
+> el servicio sea gratis), así que **GitHub es la opción sin tarjeta**.
 
 ### Alternativa: Railway
 
 [railway.app](https://railway.app) también tiene plan gratis y usa el
 **`Procfile`** incluido: conectás el repo de GitHub, elegís "Deploy from
-GitHub", y se configura solo. Para persistencia, agregá un volumen en
-`/var/data` con `DATA_DIR=/var/data`.
+GitHub", y se configura solo. Para persistencia podés usar también el backend
+de GitHub (mismos pasos de arriba: `GITHUB_TOKEN` + `GITHUB_REPO`).
 
 ---
 

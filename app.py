@@ -19,6 +19,9 @@ from fastapi.staticfiles import StaticFiles
 
 import align
 import audio_utils as au
+import cloud
+import ghstore
+import media
 import store
 
 BASE = Path(__file__).resolve().parent
@@ -52,6 +55,21 @@ def get_model():
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _ensure_audio(sid):
+    """Asegura que el mp3 de la canción exista en disco (lo baja del backend externo si hace falta)."""
+    f = AUDIO_DIR / f"{sid}.mp3"
+    if not f.exists() and media.persistent():
+        media.get_file(f"song/{sid}.mp3", str(f))
+    return f
+
+
+def _ensure_render(sid, fname):
+    f = RENDER_DIR / f"{sid}_{fname}"
+    if not f.exists() and media.persistent():
+        media.get_file(f"render/{sid}/{fname}", str(f))
+    return f
 
 
 # ---------------------------------------------------------------- frontend
@@ -164,6 +182,9 @@ def delete_song(sid: str):
                 f.unlink()
             except OSError:
                 pass
+    if media.persistent():
+        media.delete_prefix(f"song/{sid}")
+        media.delete_prefix(f"render/{sid}/")
     return {"ok": True}
 
 
@@ -171,7 +192,7 @@ def delete_song(sid: str):
 def song_audio(sid: str):
     if not store.get_song(sid):
         raise HTTPException(404, "Canción no encontrada")
-    f = AUDIO_DIR / f"{sid}.mp3"
+    f = _ensure_audio(sid)
     if not f.exists():
         raise HTTPException(404, "El audio todavía no está listo")
     return FileResponse(str(f), media_type="audio/mpeg")
@@ -213,6 +234,17 @@ def _prune_renders(sid, max_files=60):
             old.unlink()
         except OSError:
             pass
+    if ghstore.enabled():
+        prefix = f"render/{sid}/"
+        for name in ghstore.list_dir(prefix)[:-max_files]:
+            ghstore.delete_path(prefix + name)
+    if cloud.cloud_enabled():
+        keys = cloud.list_keys(f"render/{sid}/")
+        for key, _lm in keys[:-max_files]:
+            try:
+                cloud.delete_key(key)
+            except Exception:
+                pass
 
 
 def _flat(song):
@@ -327,7 +359,11 @@ def render(sid: str, payload: dict):
     fname = f"{uid}_{chash}.mp3"
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
-        au.render_phrases(str(AUDIO_DIR / f"{sid}.mp3"), segments, str(out))
+        au.render_phrases(str(_ensure_audio(sid)), segments, str(out))
+        if media.persistent():
+            ok = media.put_file(f"render/{sid}/{fname}", str(out))
+            if not ok:
+                raise HTTPException(500, "No se pudo guardar el audio en la nube")
         _prune_renders(sid)
     return {
         "url": f"/api/songs/{sid}/render/{fname}",
@@ -342,7 +378,7 @@ def render(sid: str, payload: dict):
 def render_file(sid: str, fname: str):
     if not re.fullmatch(r"[0-9a-f]{8}_[0-9a-f]{8}\.mp3", fname):
         raise HTTPException(404, "Audio no encontrado")
-    f = RENDER_DIR / f"{sid}_{fname}"
+    f = _ensure_render(sid, fname)
     if not f.exists():
         raise HTTPException(404, "Audio no encontrado")
     return FileResponse(str(f), media_type="audio/mpeg",
@@ -372,6 +408,14 @@ def process_song(sid):
         au.to_wav16k(str(src), str(wav))
         au.to_streaming_mp3(str(src), str(mp3))
         song["duration"] = au.ffprobe_duration(str(mp3))
+        if media.persistent():
+            media.put_file(f"song/{sid}.mp3", str(mp3))
+        # el archivo fuente original ya no hace falta (se usó para convertir)
+        try:
+            if os.path.exists(str(src)) and str(src) != str(mp3):
+                os.remove(str(src))
+        except OSError:
+            pass
 
         model = get_model()
         lang = song["language"] or None
