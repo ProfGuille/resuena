@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v16"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v17"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -592,6 +592,7 @@ def render(sid: str, payload: dict):
     segments = []
     skipped = 0
     omitted_words = 0
+    phrases = []          # texto de cada rango pedido + si aportó audio
     for a, b in ranges:
         a = max(0, int(a))
         b = min(total - 1, int(b))
@@ -600,6 +601,10 @@ def render(sid: str, payload: dict):
         # inicio de la siguiente palabra de la letra (límite duro del corte)
         nxt = flat[b + 1][2]["s"] if b + 1 < total else None
         words = [w for (_, _, w) in flat[a:b + 1]]
+        phrases.append({
+            "text": " ".join(w.get("raw", "") for w in words).strip(),
+            "ok": True,
+        })
         omitted_words += sum(1 for w in words if not w.get("m"))
         # dividir la selección en tramos contiguos de palabras CON audio;
         # los huecos sin audio detectado se saltean (no invaden el audio final)
@@ -675,6 +680,8 @@ def render(sid: str, payload: dict):
                             if e0 - s0 > 0.05:
                                 segments.append((s0, e0))
                                 continue
+            if phrases:
+                phrases[-1]["ok"] = False
             skipped += 1
             continue
 
@@ -771,6 +778,7 @@ def render(sid: str, payload: dict):
         "duration": au.ffprobe_duration(str(out)),
         "skipped": skipped,
         "omitted": omitted_words,
+        "phrases": phrases,
     }
 
 
