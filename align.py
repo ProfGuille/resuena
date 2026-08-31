@@ -142,12 +142,18 @@ def _interpolate_line(line):
                 cur = words[k]["s"]
 
 
-def _line_window_match(lines, transcript, min_score=0.5):
+def _line_window_match(lines, transcript, min_score=0.68):
     """Para líneas completas sin ninguna palabra ubicada: busca la mejor
     ventana de palabras del transcript (ventana deslizante con fuzzy match)
     con la restricción de que arranque después de lo ya recorrido en la letra
     (procesa en orden y es monótono). Así los coros que se repiten se ubican
-    en su aparición correcta en vez de duplicar la primera."""
+    en su aparición correcta en vez de duplicar la primera.
+
+    El umbral (min_score) es ALTO a propósito: si la transcripción no contiene
+    las palabras (p.ej. el modelo tiny malinterpreta la voz cantada), es
+    preferible dejar la línea "sin audio asociado" ANTES que ubicarla en un
+    tramo equivocado del audio (que haría sonar otra frase al pintarla).
+    """
     tn = [norm(w["word"]) for w in transcript]
     T = len(tn)
     if T == 0:
@@ -171,7 +177,7 @@ def _line_window_match(lines, transcript, min_score=0.5):
             for k in range(0, T - win_len + 1):
                 if transcript[k]["start"] < prev_end - 0.2:
                     continue  # solo apariciones después de lo ya recorrido
-                if fuzz.ratio(ln[0], tn[k]) < 50:
+                if fuzz.ratio(ln[0], tn[k]) < 55:
                     continue  # la 1ª palabra debe ser parecida (acelera mucho)
                 win = tn[k:k + win_len]
                 if all(a == b for a, b in zip(ln, win)):
@@ -182,6 +188,14 @@ def _line_window_match(lines, transcript, min_score=0.5):
                     score *= 0.95  # penalizar leve el tamaño distinto
                 if best is None or score > best[0]:
                     best = (score, k, k + win_len - 1)
+        if best and best[0] >= min_score:
+            score, k0, k1 = best
+            # verificación extra: la 1ª palabra de la línea debe coincidir bien
+            # con la 1ª de la ventana; si no, el match es dudoso y mejor dejar
+            # la línea sin audio que ubicarla en un tramo equivocado.
+            if fuzz.ratio(ln[0], tn[k0]) < 55:
+                best = None
+                score, k0, k1 = 0.0, 0, 0
         if best and best[0] >= min_score:
             score, k0, k1 = best
             seg_s = transcript[k0]["start"]

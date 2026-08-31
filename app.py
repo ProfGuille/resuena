@@ -36,7 +36,9 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
-VERSION = "v6"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v7"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
+                   # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
 
 ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus",
                 ".webm", ".mp4", ".mov", ".mpeg", ".mpga", ".oga"}
@@ -126,7 +128,19 @@ def _recover_stuck_songs():
                 song["error"] = ("El análisis se interrumpió (el servidor se reinició "
                                  "durante el procesamiento). Volvé a subir la canción.")
                 song["phase"] = None
-                store.save_song(sid, song)
+                store.save_song(sid, song, durable=True)
+    except Exception:
+        pass
+
+
+def _recheck_align():
+    """Re-encola canciones ya listas cuya alineación se generó con el pipeline
+    viejo (transcript menos preciso). Se re-analizan solas desde el mp3 ya
+    guardado, sin que el usuario tenga que volver a subir la canción."""
+    try:
+        for sid, song in store.all_songs().items():
+            if song.get("status") == "ready" and song.get("align_v") != ALIGN_VERSION:
+                process_song(sid)
     except Exception:
         pass
 
@@ -135,6 +149,7 @@ def _recover_stuck_songs():
 async def lifespan(app):
     store.init()          # memoria desde disco + GitHub (rápido, sin red en lecturas)
     _recover_stuck_songs()
+    _recheck_align()
     yield
 
 
@@ -538,14 +553,23 @@ def _process_song_impl(sid):
                     song["source_path"] = str(src)
                     store.save_song(sid, song)
             if not src or not os.path.exists(str(src)):
-                raise RuntimeError(
-                    "El archivo de audio original no está disponible "
-                    "(el servidor se reinició durante el análisis). "
-                    "Volvé a subir la canción.")
+                # reproceso: la canción ya está lista y su mp3 quedó guardado;
+                # se re-alinea desde ese mp3 (no hace falta volver a subir nada)
+                mp3_ok = AUDIO_DIR / f"{sid}.mp3"
+                if mp3_ok.exists() and mp3_ok.stat().st_size > 0:
+                    src = str(mp3_ok)
+                else:
+                    raise RuntimeError(
+                        "El archivo de audio original no está disponible "
+                        "(el servidor se reinició durante el análisis). "
+                        "Volvé a subir la canción.")
 
         wav = WAV_DIR / f"{sid}.wav"
         mp3 = AUDIO_DIR / f"{sid}.mp3"
-        au.to_wav16k(str(src), str(wav))
+        if wav.exists() and wav.stat().st_size > 0 and str(src) == str(mp3):
+            pass  # reproceso: el wav ya existe, no hace falta reconvertir
+        else:
+            au.to_wav16k(str(src), str(wav))
         au.to_streaming_mp3(str(src), str(mp3))
         song["duration"] = au.ffprobe_duration(str(mp3))
         if media.persistent():
@@ -567,10 +591,17 @@ def _process_song_impl(sid):
         # beam_size bajo (por defecto 1): mucho más rápido en CPU, suficiente
         # precisión para alinear letras; se puede subir con WHISPER_BEAM.
         beam = int(os.environ.get("WHISPER_BEAM", "1"))
+        # initial_prompt con el comienzo de la letra: mejora muchísimo la
+        # transcripción de canciones (Whisper ya "conoce" las palabras que se
+        # cantan; sin esto el modelo tiny inventa palabras en el audio cantado).
+        prompt = None
+        if song.get("lyrics"):
+            prompt = " ".join(song["lyrics"].split())[:900]
         seg_iter, info = model.transcribe(
             str(wav), language=lang, word_timestamps=True,
             vad_filter=False, beam_size=beam,
             condition_on_previous_text=False,
+            initial_prompt=prompt,
         )
         segs = []
         words = []
@@ -595,6 +626,7 @@ def _process_song_impl(sid):
         song["word_count"] = sum(len(l["words"]) for l in lines)
         song["detected_lang"] = info.language
         song["transcript_words"] = words
+        song["align_v"] = ALIGN_VERSION
         song["status"] = "ready"
         song["phase"] = "listo"
         store.save_song(sid, song, durable=True)
