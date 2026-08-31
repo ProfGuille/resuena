@@ -36,7 +36,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
-VERSION = "v7"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v8"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
 
@@ -82,7 +82,7 @@ def _proc_worker():
         sid = _proc_queue.get()
         try:
             song = store.get_song(sid)
-            if song and song.get("status") != "ready":
+            if song is not None:
                 _process_song_impl(sid)
         except Exception:
             pass
@@ -120,8 +120,9 @@ def _recover_stuck_songs():
                 continue
             if song.get("source") == "youtube":
                 process_song(sid)
-            elif media.persistent() and song.get("source_ext"):
-                # el original quedó guardado en la nube: se puede retomar el análisis
+            elif media.persistent():
+                # el mp3 guardado (song/{sid}.mp3) permite retomar el análisis
+                # aunque el original se haya perdido con el reinicio
                 process_song(sid)
             else:
                 song["status"] = "error"
@@ -136,10 +137,19 @@ def _recover_stuck_songs():
 def _recheck_align():
     """Re-encola canciones ya listas cuya alineación se generó con el pipeline
     viejo (transcript menos preciso). Se re-analizan solas desde el mp3 ya
-    guardado, sin que el usuario tenga que volver a subir la canción."""
+    guardado, sin que el usuario tenga que volver a subir la canción.
+
+    IMPORTANTE: se marca status='processing' antes de encolar para que (a) el
+    worker la procese (antes se saltaba las 'ready' y nunca se re-analizaba) y
+    (b) la UI muestre el banner de análisis mientras trabaja.
+    """
     try:
         for sid, song in store.all_songs().items():
             if song.get("status") == "ready" and song.get("align_v") != ALIGN_VERSION:
+                song["status"] = "processing"
+                song["phase"] = "encolado"
+                song["error"] = None
+                store.save_song(sid, song, durable=True)
                 process_song(sid)
     except Exception:
         pass
@@ -553,11 +563,13 @@ def _process_song_impl(sid):
                     song["source_path"] = str(src)
                     store.save_song(sid, song)
             if not src or not os.path.exists(str(src)):
-                # reproceso: la canción ya está lista y su mp3 quedó guardado;
-                # se re-alinea desde ese mp3 (no hace falta volver a subir nada)
-                mp3_ok = AUDIO_DIR / f"{sid}.mp3"
+                # reproceso: usar el mp3 ya guardado; si no está en disco
+                # (el disco efímero se borra en cada deploy), bajarlo de la nube
+                mp3_ok = _ensure_audio(sid)
                 if mp3_ok.exists() and mp3_ok.stat().st_size > 0:
                     src = str(mp3_ok)
+                    song["source_path"] = str(src)
+                    store.save_song(sid, song)
                 else:
                     raise RuntimeError(
                         "El archivo de audio original no está disponible "
@@ -566,13 +578,16 @@ def _process_song_impl(sid):
 
         wav = WAV_DIR / f"{sid}.wav"
         mp3 = AUDIO_DIR / f"{sid}.mp3"
-        if wav.exists() and wav.stat().st_size > 0 and str(src) == str(mp3):
-            pass  # reproceso: el wav ya existe, no hace falta reconvertir
-        else:
+        # reutilizar el wav ya convertido (el disco efímero a veces sobrevive
+        # entre restarts del mismo proceso) y evitar reconvertir si el mp3 es
+        # la fuente (re-análisis: ya es mp3, no hace falta volver a convertirlo)
+        if not (wav.exists() and wav.stat().st_size > 0):
             au.to_wav16k(str(src), str(wav))
-        au.to_streaming_mp3(str(src), str(mp3))
+        if str(src) != str(mp3):
+            au.to_streaming_mp3(str(src), str(mp3))
         song["duration"] = au.ffprobe_duration(str(mp3))
-        if media.persistent():
+        # en re-análisis (src == mp3) el mp3 no cambió: no hace falta re-subirlo
+        if media.persistent() and str(src) != str(mp3):
             _set_phase(sid, "guardando")
             media.put_file(f"song/{sid}.mp3", str(mp3))
         # el archivo fuente original ya no hace falta (se usó para convertir)
