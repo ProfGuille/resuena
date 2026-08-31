@@ -265,7 +265,7 @@
   </div>
 
   <div class="banner info" id="procBanner">
-    <span class="spin"></span> Analizando la canción y alineando la letra con el audio… esto suele tardar 1 a 3 minutos.
+    <span class="spin"></span> <span id="procText">Preparando el análisis…</span>
   </div>
   <div class="banner info" id="covBanner"></div>
   <div class="banner err" id="errBanner"></div>
@@ -446,7 +446,7 @@ function renderLibrary(){
     const st = s.status;
     const chip = st==='ready' ? '<span class="status ready">✓ lista</span>'
       : st==='error' ? `<span class="status error">✗ error</span>`
-      : '<span class="status processing"><span class="spin"></span>procesando</span>';
+      : `<span class="status processing"><span class="spin"></span>${s.phase==='transcribiendo'?'analizando':s.phase==='encolado'?'en cola':'procesando'}</span>`;
     const dur = s.duration ? fmt(s.duration) : '';
     const src = s.source==='youtube' ? '▶ YouTube' : '📁 archivo';
     return `<div class="card">
@@ -490,6 +490,7 @@ async function openSong(id){
     $('edCov').textContent = s.coverage != null ? `alineación ${Math.round(s.coverage*100)}%` : '';
     $('edSrc').textContent = s.source==='youtube' ? 'Fuente: YouTube' : 'Fuente: archivo';
     if (s.status === 'processing'){
+      $('procText').textContent = phaseText(s.phase);
       $('procBanner').classList.add('show');
       pollSong(id);
     } else if (s.status === 'error'){
@@ -507,6 +508,14 @@ function showErr(msg){
   $('errBanner').textContent = '⚠ ' + msg;
   $('errBanner').classList.add('show');
 }
+function phaseText(p){
+  return {
+    'encolado': 'En cola: hay otra canción analizándose antes…',
+    'descargando': 'Descargando el audio y preparando el análisis…',
+    'transcribiendo': 'Analizando la voz y alineando la letra con el audio. Puede tardar varios minutos la primera vez…',
+    'guardando': '¡Ya casi! Guardando el resultado…',
+  }[p] || 'Analizando la canción y alineando la letra con el audio…';
+}
 function pollSong(id){
   clearInterval(state.timer);
   state.timer = setInterval(async () => {
@@ -521,6 +530,8 @@ function pollSong(id){
         $('edCov').textContent = s.coverage != null ? `alineación ${Math.round(s.coverage*100)}%` : '';
         await loadSel(id);
         renderSong();
+      } else if (s.status === 'processing'){
+        $('procText').textContent = phaseText(s.phase);
       } else if (s.status === 'error'){
         clearInterval(state.timer);
         $('procBanner').classList.remove('show');
@@ -852,6 +863,16 @@ async function submitUpload(){
   if (tab==='file' && !$('upFile').files.length){ $('upNote').textContent = '⚠ Elegí un archivo de audio.'; return; }
   if (tab==='yt' && !$('upUrl').value.trim()){ $('upNote').textContent = '⚠ Pegá el link de YouTube.'; return; }
 
+  // anti-duplicados: si ya existe una canción con el mismo título, preguntar
+  const tituloNuevo = ($('upTitle').value.trim() || '').toLowerCase();
+  if (tituloNuevo){
+    const dup = state.songs.find(s => s.title && s.title.toLowerCase() === tituloNuevo && s.status === 'ready');
+    if (dup){
+      const seguir = confirm(`Ya existe "${dup.title}" en la biblioteca. ¿La subís igual (puede ser otra versión)?`);
+      if (!seguir) return;
+    }
+  }
+
   const fd = new FormData();
   fd.append('lyrics', lyrics);
   fd.append('title', $('upTitle').value.trim());
@@ -920,4 +941,3 @@ async function shareSongId(id){
 </script>
 </body>
 </html>
-/html>
