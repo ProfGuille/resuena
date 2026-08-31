@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Resuena — las frases que te resuenan de una canción</title>
+<style>
+  :root{
+    --bg:#0b0f19; --panel:#121a2b; --panel2:#182238; --border:#26334d;
+    --text:#e8edf7; --muted:#8fa0c2; --accent:#7c5cff; --accent2:#22d3ee;
+    --sel:#ffd166; --err:#ff6b6b; --ok:#4ade80;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{height:100%}
+  body{
+    background:radial-gradient(1200px 600px at 80% -10%, #1c2a52 0%, var(--bg) 55%);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100%;
+  }
+  a{color:var(--accent2); text-decoration:none}
+  button{font-family:inherit}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex; align-items:center; gap:14px;
+    padding:18px 26px; border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:20;
+    background:rgba(11,15,25,.85); backdrop-filter:blur(8px);
+  }
+  .logo{display:flex; align-items:center; gap:10px; cursor:pointer}
+  .logo .mark{
+    width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    font-size:20px;
+  }
+  .logo b{font-size:19px; letter-spacing:.3px}
+  .logo b em{font-style:normal; background:linear-gradient(90deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text; background-clip:text; color:transparent}
+  .logo small{display:block;color:var(--muted);font-size:11px;font-weight:400}
+  header .spacer{flex:1}
+  .pill{font-size:12px;color:var(--muted);border:1px solid var(--border);
+    padding:5px 10px;border-radius:99px}
+
+  /* ---------- layout ---------- */
+  .wrap{max-width:1180px;margin:0 auto;padding:26px 26px 80px}
+
+  /* ---------- hero / intro ---------- */
+  .hero{
+    background:linear-gradient(135deg,rgba(124,92,255,.14),rgba(34,211,238,.08) 60%);
+    border:1px solid var(--border);border-radius:20px;
+    padding:26px 28px;margin-bottom:26px;
+    display:flex;gap:30px;align-items:center;flex-wrap:wrap;
+  }
+  .hero-text{flex:1;min-width:260px}
+  .hero h1{font-size:34px;letter-spacing:.5px}
+  .hero h1 .dot{background:linear-gradient(90deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero .lead{color:var(--muted);font-size:14.5px;line-height:1.6;margin-top:8px;max-width:46ch}
+  .steps{display:flex;flex-direction:column;gap:10px;min-width:300px}
+  .step{display:flex;gap:12px;align-items:flex-start;font-size:13.5px;line-height:1.45;color:var(--text)}
+  .step .num{
+    flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#081019;
+    font-weight:700;font-size:13px;margin-top:1px;
+  }
+  .step b{color:var(--accent2)}
+
+  /* ---------- library ---------- */
+  .lib-head{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+  .lib-head h1{font-size:24px}
+  .lib-head p{color:var(--muted);font-size:13px;margin-top:3px;width:100%}
+  .search{flex:1;min-width:220px;background:var(--panel);border:1px solid var(--border);
+    border-radius:12px;padding:11px 14px;color:var(--text);font-size:14px;outline:none}
+  .search:focus{border-color:var(--accent)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;
+    overflow:hidden;transition:transform .12s ease,border-color .12s ease}
+  .card:hover{transform:translateY(-2px);border-color:#3a4a70}
+  .card .thumb{height:96px;background:linear-gradient(135deg,#241b52,#12354a);
+    display:flex;align-items:center;justify-content:center;font-size:38px;position:relative}
+  .card .status{position:absolute;top:10px;right:10px;font-size:11px;padding:4px 9px;
+    border-radius:99px;background:rgba(0,0,0,.45);backdrop-filter:blur(4px)}
+  .status.ready{color:var(--ok)} .status.error{color:var(--err)} .status.processing{color:var(--sel)}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid rgba(255,255,255,.25);
+    border-top-color:var(--sel);border-radius:50%;animation:rot .8s linear infinite;vertical-align:-1px;margin-right:5px}
+  @keyframes rot{to{transform:rotate(360deg)}}
+  .card .body{padding:14px 16px}
+  .card h3{font-size:15px;margin-bottom:3px}
+  .card .artist{color:var(--muted);font-size:13px}
+  .card .meta{color:var(--muted);font-size:12px;margin-top:8px;display:flex;gap:12px;flex-wrap:wrap}
+  .card .actions{display:flex;gap:8px;margin-top:14px}
+  .empty{background:var(--panel);border:1px dashed #3a4a70;border-radius:16px;
+    padding:52px 30px;text-align:center;color:var(--muted)}
+  .empty .big{font-size:52px;margin-bottom:12px}
+  .empty h3{color:var(--text);font-size:19px;margin-bottom:8px}
+
+  /* ---------- buttons ---------- */
+  .btn{display:inline-flex;align-items:center;gap:8px;border:none;cursor:pointer;
+    border-radius:11px;padding:10px 16px;font-size:14px;font-weight:600;
+    transition:filter .12s ease,transform .06s ease;white-space:nowrap}
+  .btn:active{transform:scale(.97)}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#081019}
+  .btn.primary:hover{filter:brightness(1.12)}
+  .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+  .btn.ghost:hover{border-color:#3a4a70;background:rgba(255,255,255,.03)}
+  .btn.danger{background:transparent;border:1px solid rgba(255,107,107,.4);color:var(--err)}
+  .btn.danger:hover{background:rgba(255,107,107,.08)}
+  .btn.sm{padding:7px 11px;font-size:12.5px;border-radius:9px}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+
+  /* ---------- modal ---------- */
+  .overlay{position:fixed;inset:0;background:rgba(4,7,14,.7);backdrop-filter:blur(3px);
+    display:none;align-items:flex-start;justify-content:center;z-index:50;
+    padding:4vh 16px;overflow-y:auto}
+  .overlay.open{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:18px;
+    width:100%;max-width:620px;padding:24px}
+  .modal h2{font-size:19px;margin-bottom:4px}
+  .modal .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .modal label{display:block;font-size:12.5px;color:var(--muted);margin:14px 0 6px;font-weight:600}
+  .modal input[type=text],.modal textarea,.modal select{
+    width:100%;background:var(--panel2);border:1px solid var(--border);
+    border-radius:10px;padding:11px 13px;color:var(--text);font-size:14px;outline:none;font-family:inherit}
+  .modal input:focus,.modal textarea:focus,.modal select:focus{border-color:var(--accent)}
+  .modal textarea{resize:vertical;min-height:170px;line-height:1.55}
+  .tabs{display:flex;gap:8px;margin-bottom:6px}
+  .tab{flex:1;text-align:center;padding:10px;border-radius:10px;border:1px solid var(--border);
+    background:transparent;color:var(--muted);cursor:pointer;font-size:13.5px;font-weight:600}
+  .tab.active{background:linear-gradient(135deg,rgba(124,92,255,.22),rgba(34,211,238,.15));
+    color:var(--text);border-color:var(--accent)}
+  .modal .foot{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+  .note{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
+
+  /* ---------- editor ---------- */
+  .editor-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+  .editor-top h1{font-size:22px;display:flex;align-items:center;gap:10px}
+  .editor-top .back{font-size:22px;cursor:pointer;color:var(--muted);background:none;border:none}
+  .editor-top .back:hover{color:var(--text)}
+  .chip{font-size:12px;border:1px solid var(--border);border-radius:99px;padding:4px 11px;color:var(--muted)}
+  .banner{border-radius:12px;padding:12px 16px;font-size:13.5px;margin-bottom:18px;display:none}
+  .banner.show{display:block}
+  .banner.info{background:rgba(34,211,238,.09);border:1px solid rgba(34,211,238,.3);color:#a5eefb}
+  .banner.err{background:rgba(255,107,107,.09);border:1px solid rgba(255,107,107,.35);color:#ffb3b3}
+  .cols{display:grid;grid-template-columns:1fr 360px;gap:22px;align-items:start}
+  @media (max-width:900px){.cols{grid-template-columns:1fr}}
+
+  /* player */
+  .player{background:var(--panel);border:1px solid var(--border);border-radius:16px;
+    padding:16px 18px;margin-bottom:18px}
+  .player .top{display:flex;align-items:center;gap:14px}
+  .playbig{width:46px;height:46px;border-radius:50%;border:none;cursor:pointer;flex:none;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#081019;font-size:17px;
+    display:grid;place-items:center}
+  .playbig:hover{filter:brightness(1.12)}
+  .player .tinfo{flex:1;min-width:0}
+  .player .tinfo .tt{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .player .tinfo .ta{font-size:12.5px;color:var(--muted)}
+  .mode{display:flex;gap:6px;flex:none}
+  .mode button{font-size:11.5px;padding:6px 10px;border-radius:8px;border:1px solid var(--border);
+    background:transparent;color:var(--muted);cursor:pointer;font-weight:600}
+  .mode button.on{background:rgba(255,209,102,.15);color:var(--sel);border-color:rgba(255,209,102,.5)}
+  .seek{display:flex;align-items:center;gap:10px;margin-top:12px}
+  .seek input{flex:1;accent-color:var(--accent);cursor:pointer}
+  .seek .t{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:38px}
+
+  /* lyrics */
+  .lyrics{background:var(--panel);border:1px solid var(--border);border-radius:16px;
+    padding:20px 18px;max-height:62vh;overflow-y:auto}
+  .lyrics .hint{font-size:12.5px;color:var(--muted);margin-bottom:14px;
+    border:1px dashed var(--border);border-radius:10px;padding:9px 12px}
+  .line{display:flex;gap:10px;padding:3px 6px;border-radius:9px;border-left:3px solid transparent;
+    align-items:center;position:relative;margin-bottom:1px}
+  .line.in-sel{background:rgba(255,209,102,.06);border-left-color:var(--sel)}
+  .line .lno{width:22px;flex:none;text-align:right;color:#51638a;font-size:11px;
+    font-variant-numeric:tabular-nums;user-select:none}
+  .line .lprev{flex:none;border:none;background:none;color:#51638a;cursor:pointer;font-size:12px;
+    width:20px;height:20px;border-radius:6px;display:grid;place-items:center}
+  .line .lprev:hover{color:var(--sel);background:rgba(255,209,102,.12)}
+  .line .words{flex:1}
+  .word{display:inline-block;margin:2px 1px;padding:2px 4px;border-radius:6px;cursor:pointer;
+    font-size:16.5px;line-height:1.45;color:var(--text);transition:background .08s ease}
+  .word:hover{background:rgba(255,255,255,.07)}
+  .word.sel{background:rgba(255,209,102,.30);color:#ffe9b3;box-shadow:0 0 0 1px rgba(255,209,102,.4)}
+  .line.nohit .word{color:#5a6a90}
+  .line .lno.nohit{color:#7a5a6a}
+  .line .badge{font-size:10.5px;color:#d8a8a8;background:rgba(255,107,107,.08);
+    border:1px solid rgba(255,107,107,.3);border-radius:99px;padding:2px 9px;
+    flex:none;margin-left:auto;white-space:nowrap}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--muted)}
+  .legend .lg{display:inline-flex;align-items:center;gap:6px}
+  .lg-sel::before{content:"";width:11px;height:11px;border-radius:3px;
+    background:rgba(255,209,102,.55);display:inline-block;box-shadow:0 0 0 1px rgba(255,209,102,.4)}
+  .lg-nohit{color:#d8a8a8}
+  .word.drag{outline:2px solid rgba(255,209,102,.5);outline-offset:0}
+
+  /* selection panel */
+  .selpanel{background:var(--panel);border:1px solid var(--border);border-radius:16px;
+    padding:18px;position:sticky;top:80px}
+  .selpanel h3{font-size:15px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+  .stat{font-size:12.5px;color:var(--muted);line-height:1.6}
+  .stat b{color:var(--sel)}
+  .selpanel .check{display:flex;gap:8px;align-items:center;margin:14px 0 6px;font-size:13px;color:var(--muted);cursor:pointer}
+  .selpanel .check input{accent-color:var(--accent)}
+  .saveinfo{font-size:11.5px;color:var(--muted);margin:8px 0 12px;height:14px}
+  .renderbox{margin-top:14px}
+  .renderbox audio{width:100%;margin-top:10px}
+  .renderbox .dl{margin-top:10px;display:inline-flex;align-items:center;gap:7px;
+    background:linear-gradient(135deg,rgba(124,92,255,.25),rgba(34,211,238,.2));
+    border:1px solid var(--accent);color:var(--text);border-radius:10px;
+    padding:9px 14px;font-size:13px;font-weight:600}
+  .renderbox .dl:hover{filter:brightness(1.15)}
+  .errmsg{color:var(--err);font-size:12.5px;margin-top:10px;display:none}
+  .nohint{color:#b08a5a;font-size:12px;margin-top:8px;display:none}
+
+  footer{color:#46557a;font-size:12px;text-align:center;padding:40px 20px 20px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="showLib()">
+    <div class="mark">🔊</div>
+    <div><b>Resuena<em>.</em></b><small>las frases que te resuenan de una canción</small></div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill" id="userPill">👤 visitante</span>
+</header>
+
+<!-- ===================== BIBLIOTECA ===================== -->
+<section class="wrap" id="view-lib">
+  <div class="hero">
+    <div class="hero-text">
+      <h1>Resuena<span class="dot">.</span></h1>
+      <p class="lead">Hay frases de una canción que nos quedan dando vueltas. Elegí las tuyas y escuchalas solas, en el orden que quieras.</p>
+    </div>
+    <div class="steps">
+      <div class="step"><span class="num">1</span><div><b>Subí</b> una canción con su letra, o usá una de la biblioteca.</div></div>
+      <div class="step"><span class="num">2</span><div><b>Pintá</b> con un clic las frases que te resuenan.</div></div>
+      <div class="step"><span class="num">3</span><div><b>Escuchá</b> el audio corto con solo tus frases y descargalo.</div></div>
+    </div>
+  </div>
+  <div class="lib-head">
+    <div style="flex:1;min-width:240px">
+      <h1>📚 Biblioteca de canciones</h1>
+      <p>Subí una canción y su letra, o usá una que ya esté subida. Cada persona arma su propia selección de frases.</p>
+    </div>
+    <input class="search" id="searchBox" placeholder="Buscar por título o artista…" oninput="renderLibrary()">
+    <button class="btn primary" onclick="openUpload()">＋ Subir canción</button>
+  </div>
+  <div class="grid" id="libGrid"></div>
+</section>
+
+<!-- ===================== EDITOR ===================== -->
+<section class="wrap" id="view-editor" style="display:none">
+  <div class="editor-top">
+    <button class="back" onclick="showLib()" title="Volver">←</button>
+    <h1 id="edTitle">…</h1>
+    <span class="chip" id="edDur"></span>
+    <span class="chip" id="edCov"></span>
+    <span class="chip" id="edSrc"></span>
+    <div style="flex:1"></div>
+    <button class="btn danger sm" onclick="deleteCurrent()">🗑 Eliminar</button>
+  </div>
+
+  <div class="banner info" id="procBanner">
+    <span class="spin"></span> Analizando la canción y alineando la letra con el audio… esto suele tardar 1 a 3 minutos.
+  </div>
+  <div class="banner info" id="covBanner"></div>
+  <div class="banner err" id="errBanner"></div>
+
+  <div class="cols">
+    <div>
+      <div class="player" id="playerBox" style="display:none">
+        <div class="top">
+          <button class="playbig" id="btnPlay" onclick="togglePlay()">▶</button>
+          <div class="tinfo">
+            <div class="tt" id="plTitle">Título</div>
+            <div class="ta" id="plArtist">Artista</div>
+          </div>
+          <div class="mode">
+            <button id="modeFull" class="on" onclick="setMode('full')">Canción completa</button>
+            <button id="modeSel" onclick="setMode('sel')">Solo mis frases</button>
+          </div>
+        </div>
+        <div class="seek">
+          <span class="t" id="curTime">0:00</span>
+          <input type="range" id="seekBar" min="0" max="100" value="0" oninput="onSeek(this.value)">
+          <span class="t" id="totTime">0:00</span>
+        </div>
+      </div>
+
+      <div class="lyrics" id="lyricsBox"><p class="hint">Cargando…</p></div>
+      <div class="legend" id="legend" style="display:none">
+        <span class="lg lg-sel">seleccionada</span>
+        <span class="lg lg-nohit">⚠ sin audio asociado</span>
+        <span class="lg">🖱 clic o arrastre para pintar</span>
+      </div>
+    </div>
+
+    <aside class="selpanel">
+      <h3>🎨 Mis frases seleccionadas</h3>
+      <p class="stat" id="statSel">Ninguna palabra seleccionada todavía.</p>
+      <label class="check"><input type="checkbox" id="allOcc"> Incluir <b>todas las apariciones</b> de cada frase (ej. coros que se repiten)</label>
+      <p class="saveinfo" id="saveInfo"></p>
+      <button class="btn primary" id="btnRender" style="width:100%" onclick="generateRender()">🎬 Generar audio con mis frases</button>
+      <p class="nohint" id="noHitHint">⚠ Algunas frases no tienen audio asociado (la letra no coincide con lo que se canta).</p>
+      <div class="renderbox" id="renderBox" style="display:none">
+        <audio id="selAudio" controls preload="metadata"></audio>
+        <a class="dl" id="dlLink" download>⬇ Descargar MP3</a>
+        <p class="note" id="renderNote"></p>
+        <p class="note" id="renderWarn" style="color:#ffb3b3;display:none"></p>
+      </div>
+      <p class="errmsg" id="renderErr"></p>
+    </aside>
+  </div>
+</section>
+
+<footer>Resuena · las frases que te resuenan · procesamiento con <b>faster-whisper</b> + <b>ffmpeg</b> (todo gratuito)</footer>
+
+<!-- ===================== MODAL SUBIR ===================== -->
+<div class="overlay" id="uploadOv">
+  <div class="modal">
+    <h2>Subir canción</h2>
+    <p class="sub">La canción queda en la biblioteca para que cualquiera la use; cada uno pinta sus propias frases.</p>
+
+    <div class="tabs">
+      <button class="tab active" id="tabFile" onclick="setTab('file')">📁 Archivo</button>
+      <button class="tab" id="tabYt" onclick="setTab('yt')">▶ YouTube</button>
+    </div>
+    <div id="fileRow">
+      <label>Audio (MP3, WAV, OGG, M4A, FLAC…)</label>
+      <input type="file" id="upFile" accept="audio/*,video/*">
+    </div>
+    <div id="ytRow" style="display:none">
+      <label>Link del video / audio de YouTube</label>
+      <input type="text" id="upUrl" placeholder="https://www.youtube.com/watch?v=…">
+      <p class="note">⚠ YouTube a veces bloquea la descarga desde servidores (error 403). Si falla, probá con otro link o subiendo el archivo de audio.</p>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <label>Título (opcional)</label>
+        <input type="text" id="upTitle" placeholder="Se toma del archivo/YouTube">
+      </div>
+      <div>
+        <label>Artista (opcional)</label>
+        <input type="text" id="upArtist" placeholder="Se toma de YouTube">
+      </div>
+    </div>
+    <label>Idioma de la canción <span style="color:#51638a">(dejalo en "auto" si no sabés)</span></label>
+    <select id="upLang">
+      <option value="">Auto (detectar)</option>
+      <option value="es">Español</option>
+      <option value="en">Inglés</option>
+      <option value="pt">Portugués</option>
+      <option value="fr">Francés</option>
+      <option value="it">Italiano</option>
+      <option value="de">Alemán</option>
+    </select>
+
+    <label>Letra (pegala tal como se canta, línea por línea)</label>
+    <textarea id="upLyrics" placeholder="Primera línea de la canción&#10;Segunda línea&#10;…"></textarea>
+
+    <div class="foot">
+      <button class="btn ghost" onclick="closeUpload()">Cancelar</button>
+      <button class="btn primary" id="upBtn" onclick="submitUpload()">🚀 Subir y analizar</button>
+    </div>
+    <p class="note" id="upNote"></p>
+  </div>
+</div>
+
+<script>
+/* ============================================================ estado */
+const $ = id => document.getElementById(id);
+const state = {
+  view: 'lib',
+  songs: [],
+  song: null,
+  sel: [],          // rangos [a,b]
+  anchor: null,     // última palabra tocada (para shift-click)
+  mode: 'full',     // 'full' | 'sel'
+  selUrl: null,
+  timer: null,
+  uid: (localStorage.getItem('lm_uid') || (localStorage.setItem('lm_uid', Math.random().toString(36).slice(2,10)), localStorage.getItem('lm_uid'))),
+  dirty: false,
+};
+const selAudio = new Audio();
+selAudio.addEventListener('ended', () => { if (state.mode==='sel') $('btnPlay').textContent = '▶'; });
+$('userPill').textContent = '👤 usuario ' + state.uid;
+$('selAudio').src = ''; // se setea al renderizar
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if (!r.ok){
+    let msg = 'Error ' + r.status;
+    try { const j = await r.json(); msg = j.detail || msg; } catch(e){}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ============================================================ vistas */
+function showLib(){
+  state.view = 'lib';
+  $('view-lib').style.display = ''; $('view-editor').style.display = 'none';
+  loadSongs();
+}
+function showEditor(){ state.view='editor'; $('view-lib').style.display='none'; $('view-editor').style.display=''; }
+
+async function loadSongs(){
+  try {
+    const j = await api('/api/songs');
+    state.songs = j.songs;
+  } catch(e){ state.songs = []; }
+  renderLibrary();
+}
+function renderLibrary(){
+  const q = ($('searchBox').value || '').toLowerCase().trim();
+  const songs = state.songs.filter(s => !q || (s.title+' '+(s.artist||'')).toLowerCase().includes(q));
+  const g = $('libGrid');
+  if (!songs.length){
+    g.innerHTML = `<div class="empty" style="grid-column:1/-1">
+      <div class="big">🎧</div>
+      <h3>${state.songs.length ? 'No se encontraron canciones' : 'Todavía no hay canciones'}</h3>
+      <p style="margin:10px 0 18px">Subí una canción con su letra y empezá a pintar frases.</p>
+      <button class="btn primary" onclick="openUpload()">＋ Subir la primera canción</button>
+    </div>`;
+    return;
+  }
+  g.innerHTML = songs.map(s => {
+    const st = s.status;
+    const chip = st==='ready' ? '<span class="status ready">✓ lista</span>'
+      : st==='error' ? `<span class="status error">✗ error</span>`
+      : '<span class="status processing"><span class="spin"></span>procesando</span>';
+    const dur = s.duration ? fmt(s.duration) : '';
+    const src = s.source==='youtube' ? '▶ YouTube' : '📁 archivo';
+    return `<div class="card">
+      <div class="thumb">🎵 ${chip}</div>
+      <div class="body">
+        <h3>${esc(s.title || 'Sin título')}</h3>
+        <div class="artist">${esc(s.artist || 'Artista desconocido')}</div>
+        <div class="meta"><span>${src}</span>${dur?`<span>${dur}</span>`:''}<span>${s.word_count||0} palabras</span></div>
+        <div class="actions">
+          ${st==='ready'
+            ? `<button class="btn primary sm" onclick="openSong('${s.id}')">🎨 Pintar frases</button>`
+            : st==='error'
+              ? `<button class="btn danger sm" onclick="openSong('${s.id}')">Ver error</button>`
+              : `<button class="btn ghost sm" disabled>Procesando…</button>`}
+          <button class="btn danger sm" onclick="delSong('${s.id}')" title="Eliminar">🗑</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ============================================================ editor */
+async function openSong(id){
+  showEditor();
+  state.song = null; state.sel = []; state.selUrl = null; state.mode = 'full';
+  $('lyricsBox').innerHTML = '<p class="hint">Cargando…</p>';
+  $('playerBox').style.display = 'none';
+  $('procBanner').classList.remove('show');
+  $('errBanner').classList.remove('show');
+  $('renderBox').style.display = 'none';
+  $('renderErr').style.display = 'none';
+  $('noHitHint').style.display = 'none';
+  $('modeFull').classList.add('on'); $('modeSel').classList.remove('on');
+  $('edTitle').textContent = '…';
+  try {
+    const s = await api('/api/songs/' + id);
+    state.song = s;
+    $('edTitle').textContent = s.title || 'Sin título';
+    $('edDur').textContent = s.duration ? fmt(s.duration) : '';
+    $('edCov').textContent = s.coverage != null ? `alineación ${Math.round(s.coverage*100)}%` : '';
+    $('edSrc').textContent = s.source==='youtube' ? 'Fuente: YouTube' : 'Fuente: archivo';
+    if (s.status === 'processing'){
+      $('procBanner').classList.add('show');
+      pollSong(id);
+    } else if (s.status === 'error'){
+      showErr(s.error || 'Ocurrió un error al procesar la canción.');
+    } else if (s.status === 'ready'){
+      await loadSel(id);
+      renderSong();
+    }
+  } catch(e){ showErr(e.message); }
+}
+function showErr(msg){
+  $('errBanner').textContent = '⚠ ' + msg;
+  $('errBanner').classList.add('show');
+}
+function pollSong(id){
+  clearInterval(state.timer);
+  state.timer = setInterval(async () => {
+    try {
+      const s = await api('/api/songs/' + id);
+      if (s.status === 'ready'){
+        clearInterval(state.timer);
+        $('procBanner').classList.remove('show');
+        state.song = s;
+        $('edTitle').textContent = s.title || 'Sin título';
+        $('edDur').textContent = s.duration ? fmt(s.duration) : '';
+        $('edCov').textContent = s.coverage != null ? `alineación ${Math.round(s.coverage*100)}%` : '';
+        await loadSel(id);
+        renderSong();
+      } else if (s.status === 'error'){
+        clearInterval(state.timer);
+        $('procBanner').classList.remove('show');
+        state.song = s;
+        showErr(s.error || 'Ocurrió un error.');
+      }
+    } catch(e){ /* reintentar */ }
+  }, 2500);
+}
+
+async function loadSel(id){
+  const j = await api(`/api/songs/${id}/selection?user_id=${encodeURIComponent(state.uid)}`);
+  state.sel = (j.ranges || []).map(r => [r[0], r[1]]);
+}
+
+/* ---------- letra ---------- */
+function flatWords(){
+  const out = [];
+  (state.song.lines || []).forEach((l, li) => l.words.forEach((w, wi) => out.push({li, wi, w})));
+  return out;
+}
+function inSel(i){ return state.sel.some(([a,b]) => a<=i && i<=b); }
+function selCount(){ return flatWords().filter((_,i)=>inSel(i)).length; }
+function selRangesFlat(){ return state.sel.map(([a,b]) => [a,b]); }
+
+function toggleWord(i){
+  const fi = state.sel.findIndex(([a,b]) => a<=i && i<=b);
+  if (fi >= 0){
+    const [a,b] = state.sel[fi];
+    state.sel.splice(fi,1);
+    if (i>a) state.sel.push([a,i-1]);
+    if (i<b) state.sel.push([i+1,b]);
+  } else {
+    // unir con adyacentes
+    let a=i, b=i;
+    for (const [x,y] of state.sel){
+      if (y === a-1) a = x;
+      if (x === b+1) b = y;
+    }
+    state.sel = state.sel.filter(([x,y]) => !(y>=a-1 && x<=b+1));
+    state.sel.push([a,b]);
+  }
+  state.sel.sort((p,q)=>p[0]-q[0]);
+  state.anchor = i;
+  paint(); scheduleSave();
+}
+function replaceRange(a,b){
+  state.sel = [[a,b]];
+  state.anchor = b;
+  paint(); scheduleSave();
+}
+function extendTo(i){
+  if (state.anchor === null) return toggleWord(i);
+  replaceRange(Math.min(state.anchor, i), Math.max(state.anchor, i));
+}
+
+function paint(){
+  // clases en palabras y líneas
+  const selSet = new Set();
+  state.sel.forEach(([a,b]) => { for (let i=a;i<=b;i++) selSet.add(i); });
+  const wEls = document.querySelectorAll('.word');
+  let i = 0;
+  for (const el of wEls){ el.classList.toggle('sel', selSet.has(i++)); }
+  document.querySelectorAll('.line').forEach((ln, li) => {
+    const line = (state.song.lines || [])[li];
+    const selIn = line.words.some((_, wi) => { let k=0; for(let l2=0;l2<li;l2++) k+=state.song.lines[l2].words.length; return selSet.has(k+wi); });
+    ln.classList.toggle('in-sel', selIn);
+  });
+  updateStats();
+}
+
+function renderSong(){
+  const s = state.song;
+  $('plTitle').textContent = s.title || 'Sin título';
+  $('plArtist').textContent = s.artist || 'Artista desconocido';
+  $('playerBox').style.display = '';
+  $('btnPlay').textContent = '▶';
+  $('legend').style.display = '';
+  const hasNoHit = (s.lines||[]).some(l => l.words.some(w => !w.m));
+  $('noHitHint').style.display = hasNoHit ? '' : 'none';
+
+  // Aviso de baja alineación: sugerencia de ajustar la letra
+  const cov = s.coverage ?? 1;
+  const cb = $('covBanner');
+  if (cov < 0.7){
+    cb.textContent = '⚠ La letra no coincide mucho con el audio (' + Math.round(cov*100) + '%). Revisá que sea exactamente lo que se canta (sin [Coro], "(x2)", etc.) y probá elegir el idioma al subirla.';
+    cb.classList.add('show');
+  } else {
+    cb.classList.remove('show');
+  }
+
+  let flatI = 0;
+  $('lyricsBox').innerHTML = (s.lines||[]).map((l, li) => {
+    const words = l.words.map(w => {
+      const i = flatI++;
+      return `<span class="word" data-i="${i}" data-li="${li}">${esc(w.raw)}</span>`;
+    }).join(' ');
+    const nohit = l.words.every(w => !w.m);
+    return `<div class="line ${nohit?'nohit':''}" data-li="${li}">
+      <span class="lno ${nohit?'nohit':''}">${li+1}</span>
+      ${nohit?'':`<button class="lprev" title="Escuchar esta línea" onclick="previewLine(${li})">▶</button>`}
+      <span class="words">${words}</span>
+      ${nohit?'<span class="badge">sin audio</span>':''}
+    </div>`;
+  }).join('');
+
+  paint();
+  setupFullAudio();
+  setMode('full');
+}
+
+/* ---------- selección por arrastre ---------- */
+let dragStart = null;
+document.addEventListener('mousedown', e => {
+  const w = e.target.closest('.word');
+  if (w && state.view==='editor') dragStart = parseInt(w.dataset.i, 10);
+});
+document.addEventListener('mouseup', e => {
+  if (dragStart === null) return;
+  const w = e.target.closest('.word');
+  if (w){
+    const i = parseInt(w.dataset.i, 10);
+    if (i === dragStart){
+      if (e.shiftKey) extendTo(i);
+      else if (e.ctrlKey || e.metaKey) toggleWord(i);
+      else toggleWord(i);
+    } else {
+      if (e.shiftKey){
+        const a = Math.min(dragStart, i), b = Math.max(dragStart, i);
+        state.sel.push([a,b]);
+        state.sel.sort((p,q)=>p[0]-q[0]);
+        state.anchor = i; paint(); scheduleSave();
+      } else {
+        replaceRange(dragStart, i);
+      }
+    }
+  }
+  dragStart = null;
+});
+
+/* ---------- estadísticas / guardado ---------- */
+function fmt(sec){
+  sec = Math.round(sec||0);
+  const m = Math.floor(sec/60), s = sec%60;
+  return m + ':' + String(s).padStart(2,'0');
+}
+function estSelDur(){
+  const flat = flatWords();
+  const hit = [];
+  for (const [a,b] of state.sel){
+    for (let i=a;i<=b;i++){
+      const w = flat[i] && flat[i].w;
+      if (w && w.m) hit.push(w);
+    }
+  }
+  if (!hit.length) return 0;
+  const st = Math.min(...hit.map(w=>w.s));
+  const en = Math.max(...hit.map(w=>w.e));
+  return en - st + 0.4;
+}
+function updateStats(){
+  const total = flatWords().length;
+  const n = selCount();
+  const ns = state.sel.length;
+  const d = estSelDur();
+  $('statSel').innerHTML = n
+    ? `Pintaste <b>${n}</b> de ${total} palabras · <b>${ns}</b> frase${ns===1?'':'s'} · ≈ <b>${fmt(d)}</b>`
+    : 'Ninguna palabra seleccionada todavía.';
+}
+let saveT = null;
+function scheduleSave(){
+  state.dirty = true;
+  $('saveInfo').textContent = 'Guardando…';
+  clearTimeout(saveT);
+  saveT = setTimeout(saveSel, 700);
+}
+async function saveSel(){
+  if (!state.song) return;
+  try {
+    await api(`/api/songs/${state.song.id}/selection`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_id: state.uid, ranges: state.sel })
+    });
+    state.dirty = false;
+    $('saveInfo').textContent = '✓ Selección guardada';
+  } catch(e){ $('saveInfo').textContent = '✗ No se pudo guardar'; }
+}
+
+/* ---------- audio ---------- */
+const fullAudio = new Audio();
+fullAudio.addEventListener('timeupdate', () => {
+  if (state.mode !== 'full') return;
+  if (fullAudio.duration) $('seekBar').value = fullAudio.currentTime / fullAudio.duration * 100;
+  $('curTime').textContent = fmt(fullAudio.currentTime);
+});
+fullAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(fullAudio.duration); });
+fullAudio.addEventListener('ended', () => { $('btnPlay').textContent = '▶'; $('seekBar').value = 0; });
+selAudio.addEventListener('timeupdate', () => {
+  if (state.mode !== 'sel') return;
+  if (selAudio.duration) $('seekBar').value = selAudio.currentTime / selAudio.duration * 100;
+  $('curTime').textContent = fmt(selAudio.currentTime);
+});
+selAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(selAudio.duration); });
+
+function setupFullAudio(){
+  fullAudio.pause(); fullAudio.src = '';
+  $('curTime').textContent = '0:00'; $('totTime').textContent = '0:00'; $('seekBar').value = 0;
+  fullAudio.src = `/api/songs/${state.song.id}/audio`;
+}
+function setMode(m){
+  state.mode = m;
+  $('modeFull').classList.toggle('on', m==='full');
+  $('modeSel').classList.toggle('on', m==='sel');
+  const paused = m==='full' ? fullAudio.paused : selAudio.paused;
+  $('btnPlay').textContent = paused ? '▶' : '⏸';
+}
+function togglePlay(){
+  if (state.mode === 'sel' && state.selUrl){
+    if (selAudio.paused){ selAudio.play(); $('btnPlay').textContent='⏸'; }
+    else { selAudio.pause(); $('btnPlay').textContent='▶'; }
+  } else {
+    if (fullAudio.paused){ fullAudio.play(); $('btnPlay').textContent='⏸'; }
+    else { fullAudio.pause(); $('btnPlay').textContent='▶'; }
+  }
+}
+function onSeek(v){
+  const pct = v/100;
+  if (state.mode==='sel' && state.selUrl && selAudio.duration) selAudio.currentTime = pct*selAudio.duration;
+  else if (fullAudio.duration) fullAudio.currentTime = pct*fullAudio.duration;
+}
+
+/* ---------- preview de línea ---------- */
+async function previewLine(li){
+  const s = state.song;
+  const flat = flatWords();
+  const a = flat.findIndex(f => f.li === li);
+  const b = flat.length - 1 - [...flat].reverse().findIndex(f => f.li === li);
+  try {
+    const j = await api(`/api/songs/${s.id}/render`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_id: state.uid, ranges: [[a,b]], all_occurrences: false })
+    });
+    // URL única por contenido: fuerza al navegador a pedir el audio nuevo
+    selAudio.src = j.url + '?v=' + Date.now();
+    state.selUrl = j.url;
+    setMode('sel');
+    selAudio.load();
+    selAudio.play().then(()=>{ $('btnPlay').textContent='⏸'; }).catch(()=>{});
+  } catch(e){ $('renderErr').textContent = e.message; $('renderErr').style.display = ''; }
+}
+
+/* ---------- render ---------- */
+async function generateRender(){
+  const s = state.song;
+  $('renderErr').style.display = 'none';
+  $('renderBox').style.display = 'none';
+  $('renderWarn').style.display = 'none';
+  if (!state.sel.length){ $('renderErr').textContent = 'Primero pintá al menos una palabra.'; $('renderErr').style.display=''; return; }
+  const btn = $('btnRender');
+  btn.disabled = true; btn.textContent = '⏳ Generando…';
+  try {
+    const j = await api(`/api/songs/${s.id}/render`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_id: state.uid, ranges: state.sel, all_occurrences: $('allOcc').checked })
+    });
+    const u = j.url + '?v=' + Date.now();
+    selAudio.src = u;
+    state.selUrl = j.url;
+    $('selAudio').src = u;
+    $('dlLink').href = u;
+    $('renderNote').textContent = `${j.segments} fragmento${j.segments===1?'':'s'} · ${fmt(j.duration)} de audio`;
+    const w = $('renderWarn');
+    if (j.omitted){
+      w.textContent = `⚠ ${j.omitted} palabra${j.omitted===1?'':'s'} de tu selección no tienen audio asociado y se omitieron del audio final (para que no se cuelen otras frases).`;
+      w.style.display = '';
+    } else {
+      w.style.display = 'none';
+    }
+    $('renderBox').style.display = '';
+    setMode('sel');
+    $('btnPlay').textContent='▶';
+  } catch(e){
+    $('renderErr').textContent = e.message;
+    $('renderErr').style.display = '';
+  } finally {
+    btn.disabled = false; btn.textContent = '🎬 Generar audio con mis frases';
+  }
+}
+
+/* ---------- borrar ---------- */
+async function delSong(id){
+  if (!confirm('¿Eliminar esta canción de la biblioteca?')) return;
+  try { await api('/api/songs/' + id, {method:'DELETE'}); } catch(e){}
+  loadSongs();
+}
+async function deleteCurrent(){
+  if (!state.song) return;
+  if (!confirm('¿Eliminar esta canción de la biblioteca?')) return;
+  try { await api('/api/songs/' + state.song.id, {method:'DELETE'}); } catch(e){}
+  showLib();
+}
+
+/* ============================================================ subir */
+function openUpload(){
+  $('uploadOv').classList.add('open');
+  $('upNote').textContent = '';
+  setTab('file');
+}
+function closeUpload(){ $('uploadOv').classList.remove('open'); }
+function setTab(t){
+  $('tabFile').classList.toggle('active', t==='file');
+  $('tabYt').classList.toggle('active', t==='yt');
+  $('fileRow').style.display = t==='file' ? '' : 'none';
+  $('ytRow').style.display = t==='yt' ? '' : 'none';
+}
+$('uploadOv').addEventListener('click', e => { if (e.target === $('uploadOv')) closeUpload(); });
+
+async function submitUpload(){
+  const lyrics = $('upLyrics').value.trim();
+  if (!lyrics){ $('upNote').textContent = '⚠ La letra es obligatoria.'; return; }
+  const tab = $('tabFile').classList.contains('active') ? 'file' : 'yt';
+  if (tab==='file' && !$('upFile').files.length){ $('upNote').textContent = '⚠ Elegí un archivo de audio.'; return; }
+  if (tab==='yt' && !$('upUrl').value.trim()){ $('upNote').textContent = '⚠ Pegá el link de YouTube.'; return; }
+
+  const fd = new FormData();
+  fd.append('lyrics', lyrics);
+  fd.append('title', $('upTitle').value.trim());
+  fd.append('artist', $('upArtist').value.trim());
+  fd.append('language', $('upLang').value);
+  if (tab==='file') fd.append('file', $('upFile').files[0]);
+  else fd.append('youtube_url', $('upUrl').value.trim());
+
+  const btn = $('upBtn');
+  btn.disabled = true; btn.textContent = '⏳ Subiendo…';
+  $('upNote').textContent = 'Subiendo y empezando el análisis…';
+  try {
+    const r = await fetch('/api/songs', { method:'POST', body: fd });
+    if (!r.ok){ let m='Error'; try{ m = (await r.json()).detail || m; }catch(e){} throw new Error(m); }
+    const j = await r.json();
+    closeUpload();
+    $('upFile').value=''; $('upUrl').value=''; $('upLyrics').value='';
+    openSong(j.id);
+  } catch(e){
+    $('upNote').textContent = '✗ ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '🚀 Subir y analizar';
+  }
+}
+
+/* ============================================================ init */
+showLib();
+</script>
+</body>
+</html>
