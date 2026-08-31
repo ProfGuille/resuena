@@ -84,7 +84,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # ---------------------------------------------------------------- canciones
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": WHISPER_MODEL}
+    storage = "github" if ghstore.enabled() else ("r2" if cloud.cloud_enabled() else "local")
+    return {"ok": True, "model": WHISPER_MODEL, "storage": storage}
 
 
 @app.get("/api/songs")
