@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -22,8 +23,10 @@ from fastapi.staticfiles import StaticFiles
 import align
 import audio_utils as au
 import cloud
+import ffmpeg_util
 import ghstore
 import media
+import numpy as np
 import store
 
 BASE = Path(__file__).resolve().parent
@@ -36,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v10"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v11"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
 
@@ -450,6 +453,101 @@ def _flat(song):
     return flat
 
 
+def _speech_tail(src, s0, e0, dur, transcript, next_start=None):
+    """Extiende el final del corte hasta donde TERMINA la voz de verdad.
+
+    Solo se llama cuando la última palabra del tramo tiene timestamps
+    FALSOS (quedó interpolada: sim=0.5, sin match en el transcript), que es
+    el caso donde el corte podía caer antes de que la palabra termine. El
+    modelo tiny a veces transcribe mal la voz cantada ("incondicional"
+    puede quedar como "sesionada"): el TEXTO es basura pero la POSICIÓN de
+    esa palabra en el transcript es real.
+
+    Estrategia:
+    1. Usa como guía la palabra del transcript cuya posición cae en la cola
+       de la selección (aunque su texto esté mal).
+    2. Analiza la energía del audio: encuentra el ÚLTIMO pico de voz fuerte
+       y lleva el corte hasta que la energía decae de forma sostenida.
+    3. Nunca pasa del inicio de la siguiente palabra (next_start) ni del
+       final de la canción.
+    Si algo falla o no hay señal clara, devuelve el valor original.
+    """
+    try:
+        limit = float(dur)
+        if next_start and float(next_start) > e0 + 0.05:
+            limit = min(limit, float(next_start) - 0.05)
+        limit = min(limit, e0 + 2.0)
+        if limit <= e0 + 0.01:
+            return e0
+        # 1) palabra del transcript cuya posición cae en la cola de la selección
+        e_base = e0
+        for w in transcript:
+            try:
+                st = float(w.get("start") or 0)
+                en = float(w.get("end") or 0)
+            except Exception:
+                continue
+            if e0 - 1.2 <= st <= e0 + 0.2 and en > e0 + 0.15 and en > e_base:
+                e_base = en
+        window = min(limit, (e_base + 0.8) if e_base > e0 + 0.3 else (e0 + 1.5))
+        if window <= e0:
+            return e0
+        start = max(0.0, min(s0, e0 - 0.05))
+        end = max(window, e0 + 0.1)
+        if end - start < 0.2:
+            return e0
+        ff = ffmpeg_util.ensure_ffmpeg()
+        r = subprocess.run(
+            [ff + "/ffmpeg", "-v", "error", "-ss", f"{start:.3f}",
+             "-to", f"{end:.3f}", "-i", src,
+             "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+            capture_output=True,
+        )
+        x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+        win, hop = 480, 160          # ventana 30 ms, paso 10 ms
+        n = (len(x) - win) // hop + 1
+        if n < 20:
+            return e0
+        rms = np.empty(n)
+        for k in range(n):
+            seg = x[k * hop:k * hop + win]
+            rms[k] = float(np.sqrt(np.mean(seg * seg)))
+        # pico de energía de la PALABRA seleccionada [s0..e0] (voz, no fondo)
+        i_s0 = max(0, int(round((s0 - start) / 0.01)))
+        i_e0 = max(i_s0 + 1, min(n - 1, int(round((e0 - start) / 0.01))))
+        peak = float(rms[i_s0:i_e0 + 1].max())
+        if peak < 1e-4:
+            return e0
+        thr = max(0.008, 0.55 * peak)   # la voz domina sobre el fondo ~2x
+        k0 = max(0, int(round((e0 - start) / 0.01)))
+        # 2) último pico de voz en la ventana (ignora micro-pausas previas)
+        kend = min(n, k0 + 150)         # hasta 1.5 s después del final estimado
+        kmax = k0
+        for k in range(k0 + 1, kend):
+            if rms[k] > rms[kmax]:
+                kmax = k
+        if rms[kmax] < thr:
+            return e0                   # no hay voz después: conservar el corte
+        # caída sostenida (>= 5 ventanas = 50 ms) tras el pico: fin de la voz
+        fin = None
+        bajo = 0
+        for k in range(kmax, n):
+            if rms[k] < thr:
+                bajo += 1
+                if bajo >= 5:
+                    fin = k - bajo + 1
+                    break
+            else:
+                bajo = 0
+        if fin is None:
+            return e0                   # sin señal clara: conservar el corte
+        e_new = start + fin * 0.01 + 0.06
+        e_new = min(max(e_new, e0), limit)
+        return e_new
+    except Exception:
+        return e0
+
+
 @app.post("/api/songs/{sid}/render")
 def render(sid: str, payload: dict):
     song = store.get_song(sid)
@@ -470,6 +568,7 @@ def render(sid: str, payload: dict):
         raise HTTPException(400, "La letra está vacía")
     dur = song.get("duration") or 0.0
     transcript = song.get("transcript_words") or []
+    src = str(_ensure_audio(sid))   # ruta del mp3, se usa para el corte y para el render
 
     segments = []
     skipped = 0
@@ -479,6 +578,8 @@ def render(sid: str, payload: dict):
         b = min(total - 1, int(b))
         if a > b:
             continue
+        # inicio de la siguiente palabra de la letra (límite duro del corte)
+        nxt = flat[b + 1][2]["s"] if b + 1 < total else None
         words = [w for (_, _, w) in flat[a:b + 1]]
         omitted_words += sum(1 for w in words if not w.get("m"))
         # dividir la selección en tramos contiguos de palabras CON audio;
@@ -526,6 +627,12 @@ def render(sid: str, payload: dict):
                     pad_after = 0.25
                 s0 = max(0.0, run[0]["s"] - pad_before)
                 e0 = min(dur, run[-1]["e"] + pad_after)
+                # el timestamp del final puede cortar la última palabra cuando
+                # quedó interpolada (sim=0.5, sin match en el transcript):
+                # extender el corte hasta que la voz termina de verdad
+                last = run[-1]
+                if last.get("sim", 1.0) <= 0.55 or last.get("tj") is None:
+                    e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
                 if e0 - s0 > 0.05:
                     segments.append((s0, e0))
 
@@ -554,7 +661,7 @@ def render(sid: str, payload: dict):
     fname = f"{uid}_{chash}.mp3"
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
-        au.render_phrases(str(_ensure_audio(sid)), segments, str(out))
+        au.render_phrases(src, segments, str(out))
         # subir a la nube en segundo plano: el GET sirve desde disco y no
         # bloquea el POST (GitHub puede tardar segundos con archivos grandes)
         threading.Thread(target=_upload_render_safe,
