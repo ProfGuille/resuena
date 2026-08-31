@@ -31,11 +31,12 @@ python app.py                    # o: uvicorn app:app --host 0.0.0.0 --port 8000
 
 Abrí **http://localhost:8000**.
 
-Requisitos: **Python 3.10+** y **ffmpeg** en el PATH
-(`sudo apt install ffmpeg` en Ubuntu, `brew install ffmpeg` en Mac).
+Requisitos: **Python 3.10+**. Si tenés **ffmpeg** en el PATH, la app lo usa;
+si no lo tenés, la app **se descarga su propio ffmpeg automáticamente**
+(importante para Render, donde apt-get no funciona).
 
-> En la primera canción, faster-whisper descarga el modelo (~460 MB para
-> `small`) a `~/.cache/huggingface` y tarda un poco más.
+> En la primera canción, faster-whisper descarga el modelo (~75 MB para
+> `tiny`, ~460 MB para `small`) a `~/.cache/huggingface` y tarda un poco más.
 
 ---
 
@@ -80,6 +81,13 @@ Tenés dos opciones:
 - El deploy tarda 2–5 minutos (instala dependencias).
 - Al terminar te da una URL tipo **`https://resuena.onrender.com`** → esa es tu
   app online. Se puede abrir desde cualquier dispositivo con el link.
+
+> **Importante (para servicios creados a mano, no desde render.yaml):**
+> - En **Settings → Build & Deploy → Build Command**: `pip install -r requirements.txt`
+>   (NO uses `apt-get install ffmpeg`: falla en el plan free porque el sistema de
+>   archivos es de solo lectura durante el build; la app ya se descarga su propio ffmpeg).
+> - En **Settings → Runtime → Python version**: elegí **3.12** (Python 3.14 por
+>   defecto puede no tener los binarios que necesita la transcripción).
 
 ### Paso 5 (recomendado): persistencia gratis, SIN tarjeta (GitHub)
 

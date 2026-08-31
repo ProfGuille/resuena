@@ -2,17 +2,19 @@
 import os
 import subprocess
 
+import ffmpeg_util
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
 def ffprobe_duration(path):
-    r = run([
-        "ffprobe", "-v", "error",
+    r = ffmpeg_util.run_ffprobe([
+        "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", path,
-    ])
+    ], capture_output=True, text=True)
     try:
         return round(float(r.stdout.strip()), 2)
     except Exception:
@@ -21,7 +23,7 @@ def ffprobe_duration(path):
 
 def to_wav16k(src, dst):
     """Convierte a WAV mono 16 kHz (entrada estándar para faster-whisper)."""
-    r = run(["ffmpeg", "-y", "-i", src, "-ac", "1", "-ar", "16000",
+    r = ffmpeg_util.run_ffmpeg(["-y", "-i", src, "-ac", "1", "-ar", "16000",
              "-c:a", "pcm_s16le", dst])
     if r.returncode != 0:
         raise RuntimeError("ffmpeg: no se pudo convertir a wav: " + r.stderr[-300:])
@@ -29,7 +31,7 @@ def to_wav16k(src, dst):
 
 def to_streaming_mp3(src, dst):
     """Convierte a MP3 estéreo 44.1 kHz (para escuchar/cortar en el navegador)."""
-    r = run(["ffmpeg", "-y", "-i", src, "-vn", "-ac", "2", "-ar", "44100",
+    r = ffmpeg_util.run_ffmpeg(["-y", "-i", src, "-vn", "-ac", "2", "-ar", "44100",
              "-c:a", "libmp3lame", "-b:a", "192k", dst])
     if r.returncode != 0:
         raise RuntimeError("ffmpeg: no se pudo convertir a mp3: " + r.stderr[-300:])
@@ -125,7 +127,7 @@ def render_phrases(src_mp3, segments, out_mp3, gap=0.2):
     seg_files = []
     for k, (s, e) in enumerate(segments):
         seg = os.path.join(workdir, f".seg{k}.wav")
-        r = run(["ffmpeg", "-y", "-ss", f"{s:.3f}", "-to", f"{e:.3f}",
+        r = ffmpeg_util.run_ffmpeg(["-y", "-ss", f"{s:.3f}", "-to", f"{e:.3f}",
                  "-i", src_mp3, "-ac", "2", "-ar", "44100",
                  "-c:a", "pcm_s16le", seg])
         if r.returncode != 0:
@@ -133,7 +135,7 @@ def render_phrases(src_mp3, segments, out_mp3, gap=0.2):
         seg_files.append(seg)
 
     sil = os.path.join(workdir, ".sil.wav")
-    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+    ffmpeg_util.run_ffmpeg(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
          "-t", f"{gap:.3f}", "-c:a", "pcm_s16le", sil])
 
     items = []
@@ -146,7 +148,7 @@ def render_phrases(src_mp3, segments, out_mp3, gap=0.2):
         for p in items:
             f.write(f"file '{p}'\n")
 
-    r = run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+    r = ffmpeg_util.run_ffmpeg(["-y", "-f", "concat", "-safe", "0",
              "-i", os.path.join(workdir, ".list.txt"),
              "-c:a", "libmp3lame", "-b:a", "192k", out_mp3])
     if r.returncode != 0:
