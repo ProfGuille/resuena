@@ -35,8 +35,8 @@ RENDER_DIR = DATA_DIR / "render"
 for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
-VERSION = "v8"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+VERSION = "v9"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
 
@@ -47,12 +47,43 @@ _model = None
 _model_lock = threading.Lock()
 
 
+def _pick_model():
+    """Elige el modelo de Whisper que quepa en la RAM disponible.
+
+    Render free tiene SOLO 512 MB: el modelo 'small' necesita ~500 MB-1 GB y
+    mata el proceso (OOM) a mitad de la transcripción -> crash loop. Por eso,
+    si hay poca RAM, se baja automáticamente a un modelo que sí quepa:
+      - MemTotal < 1400 MB  -> 'small' se baja a 'base' (cabe ~150 MB)
+      - MemTotal < 700 MB   -> 'base' se baja a 'tiny' (cabe ~75 MB)
+    """
+    requested = os.environ.get("WHISPER_MODEL", "base")
+    mem_mb = None
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    mem_mb = int(line.split()[1]) // 1024
+                    break
+    except Exception:
+        pass
+    if mem_mb is not None:
+        if mem_mb < 700 and requested != "tiny":
+            print(f"RAM baja ({mem_mb} MB): bajando modelo {requested} -> tiny", flush=True)
+            return "tiny"
+        if mem_mb < 1400 and requested == "small":
+            print(f"RAM baja ({mem_mb} MB): bajando modelo small -> base", flush=True)
+            return "base"
+    return requested
+
+
 def get_model():
     global _model
     with _model_lock:
         if _model is None:
             from faster_whisper import WhisperModel
-            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+            chosen = _pick_model()
+            print(f"cargando modelo Whisper: {chosen}", flush=True)
+            _model = WhisperModel(chosen, device="cpu", compute_type="int8")
         return _model
 
 
@@ -210,8 +241,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/api/health")
 def health():
     storage = "github" if ghstore.enabled() else ("r2" if cloud.cloud_enabled() else "local")
-    return {"ok": True, "model": WHISPER_MODEL, "storage": storage, "version": VERSION}
-
+    return {"ok": True, "model": _pick_model(), "storage": storage, "version": VERSION}
 
 @app.get("/api/songs")
 def list_songs():
