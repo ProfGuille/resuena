@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -38,8 +39,6 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus",
                 ".webm", ".mp4", ".mov", ".mpeg", ".mpga", ".oga"}
 
-app = FastAPI(title="LyricMix")
-
 _model = None
 _model_lock = threading.Lock()
 
@@ -55,6 +54,37 @@ def get_model():
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _recover_stuck_songs():
+    """Al arrancar: canciones que quedaron 'processing' por un reinicio.
+    Las de YouTube o las que tienen el original guardado en la nube se
+    vuelven a procesar; el resto se marca con un mensaje claro."""
+    try:
+        for sid, song in store.all_songs().items():
+            if song.get("status") != "processing":
+                continue
+            if song.get("source") == "youtube":
+                threading.Thread(target=process_song, args=(sid,), daemon=True).start()
+            elif media.persistent() and song.get("source_ext"):
+                # el original quedó guardado en la nube: se puede retomar el análisis
+                threading.Thread(target=process_song, args=(sid,), daemon=True).start()
+            else:
+                song["status"] = "error"
+                song["error"] = ("El análisis se interrumpió (el servidor se reinició "
+                                 "durante el procesamiento). Volvé a subir la canción.")
+                store.save_song(sid, song)
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(app):
+    _recover_stuck_songs()
+    yield
+
+
+app = FastAPI(title="Resuena", lifespan=lifespan)
 
 
 def _ensure_audio(sid):
@@ -404,6 +434,20 @@ def process_song(sid):
                 song["artist"] = yt_artist[:80]
             store.save_song(sid, song)
 
+        if song["source"] != "youtube":
+            # si el original no está en disco (p.ej. reinicio), bajarlo de la nube
+            if (not src or not os.path.exists(str(src))) and media.persistent() and song.get("source_ext"):
+                tmp = AUDIO_DIR / f"{sid}_src{song['source_ext']}"
+                if media.get_file(f"src/{sid}{song['source_ext']}", str(tmp)):
+                    src = str(tmp)
+                    song["source_path"] = str(src)
+                    store.save_song(sid, song)
+            if not src or not os.path.exists(str(src)):
+                raise RuntimeError(
+                    "El archivo de audio original no está disponible "
+                    "(el servidor se reinició durante el análisis). "
+                    "Volvé a subir la canción.")
+
         wav = WAV_DIR / f"{sid}.wav"
         mp3 = AUDIO_DIR / f"{sid}.mp3"
         au.to_wav16k(str(src), str(wav))
@@ -423,9 +467,12 @@ def process_song(sid):
         # vad_filter=False: el filtro de voz descartaba partes cantadas de las
         # canciones (frases que quedaban "sin audio"). Para música es mejor
         # transcribir todo y alinear después.
+        # beam_size bajo (por defecto 1): mucho más rápido en CPU, suficiente
+        # precisión para alinear letras; se puede subir con WHISPER_BEAM.
+        beam = int(os.environ.get("WHISPER_BEAM", "1"))
         seg_iter, info = model.transcribe(
             str(wav), language=lang, word_timestamps=True,
-            vad_filter=False, beam_size=5,
+            vad_filter=False, beam_size=beam,
             condition_on_previous_text=False,
         )
         segs = []
