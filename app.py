@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v11"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v12"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
 
@@ -596,6 +596,26 @@ def render(sid: str, payload: dict):
         if cur:
             runs.append(cur)
         if not runs:
+            # respaldo GENERAL: la frase no tiene audio en esta posición (el
+            # modelo tiny la transcribió mal AHÍ), pero puede estar bien
+            # transcrita en otra aparición del audio (p. ej. un estribillo
+            # repetido que en una aparición se oye claro y en otra el coro lo
+            # tapa). Buscar la frase completa en el transcript y usar esa
+            # aparición: es mejor que sonar la frase (aunque de otra parte)
+            # que no sonar nada.
+            fb = align.find_phrase_repeated(transcript, words)
+            if fb:
+                sc, k0, k1 = fb
+                nfb = k1 - k0 + 1
+                if nfb <= 2:
+                    pb0 = pb1 = 0.0
+                else:
+                    pb0, pb1 = 0.15, 0.25
+                s0 = max(0.0, transcript[k0]["start"] - pb0)
+                e0 = min(dur, transcript[k1]["end"] + pb1)
+                if e0 - s0 > 0.05:
+                    segments.append((s0, e0))
+                    continue
             skipped += 1
             continue
 

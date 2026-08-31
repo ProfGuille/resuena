@@ -39,6 +39,9 @@ def parse_lyrics(text):
     lines = []
     for raw in text.splitlines():
         line = raw.strip().strip("♪♫")
+        # limpiar marcadores pegados a la línea: "***Kyrie Eleison***",
+        # "-Estribillo-", "♪…♪" etc. (comunes en letras pegadas de la web)
+        line = line.strip("*—–-·•♪♫")
         if not line:
             continue
         if _MARKER_RE.match(line):
@@ -319,6 +322,100 @@ def align_lines(lines, transcript, segments=None):
 
     coverage = ok / total if total else 0.0
     return lines, coverage
+
+
+def find_phrase(transcript, phrase_words, threshold=0.68, prefer_near=None):
+    """Busca la frase (palabras de la letra) en el transcript con fuzzy match.
+
+    Sirve como respaldo cuando una frase de la letra quedó SIN audio en su
+    posición (el modelo tiny la transcribió mal AHÍ), pero la misma frase
+    aparece bien transcrita en OTRA parte del audio (p. ej. el estribillo
+    repetido que en una aparición se oye claro y en otra el coro lo tapa).
+    Devuelve (k0, k1, score) de la mejor ventana del transcript, o None.
+
+    phrase_words: lista de palabras de la letra (raw).
+    prefer_near: tiempo (segundos) para desempatar entre apariciones iguales.
+    """
+    q = [norm(str(w.get("raw", ""))) for w in phrase_words]
+    q = [x for x in q if x]
+    if not q:
+        return None
+    L = len(q)
+    T = len(transcript)
+    if L == 0 or T < L:
+        return None
+    best = None
+    for k in range(0, T - L + 1):
+        win = [norm(str(w.get("word", ""))) for w in transcript[k:k + L]]
+        if all(a == b for a, b in zip(q, win)):
+            score = 1.0
+        else:
+            score = sum(fuzz.ratio(a, b) / 100.0 for a, b in zip(q, win)) / L
+        if best is None or score > best[0] + 1e-9:
+            best = (score, k, k + L - 1)
+        elif prefer_near is not None and abs(score - best[0]) <= 1e-9:
+            # desempatar: la aparición más cercana al tiempo preferido
+            cur = abs(transcript[k]["start"] - prefer_near)
+            be = abs(transcript[best[1]]["start"] - prefer_near)
+            if cur < be:
+                best = (score, k, k + L - 1)
+    if best and best[0] >= threshold:
+        return best
+    return None
+
+
+def find_phrase_repeated(transcript, phrase_words, threshold=0.68):
+    """Busca la frase en el transcript; si no aparece COMPLETA, colapsa las
+    repeticiones internas consecutivas (\"Ten piedad, Ten piedad, Ten piedad\"
+    -> \"Ten piedad\") y busca la unidad, extendiendo luego a las repeticiones
+    contiguas que existan en el audio. Devuelve (k0, k1, score) o None.
+
+    Cubre el caso general de frases repetitivas que el modelo tiny transcribió
+    mal en su posición (el coro), pero cuya unidad aparece bien en otra parte.
+    """
+    fb = find_phrase(transcript, phrase_words, threshold=threshold)
+    if fb:
+        return fb
+    q = [norm(str(w.get("raw", ""))) for w in phrase_words]
+    q = [x for x in q if x]
+    # detectar la menor unidad que se repite ("ten piedad ten piedad ten
+    # piedad" -> ["ten", "piedad"]); si no hay patrón, colapsar solo palabras
+    # consecutivas idénticas
+    n = len(q)
+    collapsed = None
+    for u in range(1, n // 2 + 1):
+        unit0 = q[:u]
+        if n % u == 0 and all(q[i:i + u] == unit0 for i in range(0, n, u)):
+            collapsed = unit0
+            break
+    if collapsed is None:
+        c = []
+        for x in q:
+            if not c or c[-1] != x:
+                c.append(x)
+        collapsed = c if len(c) < n else None
+    if collapsed is None:
+        return None
+    unit = [{"raw": c} for c in collapsed]
+    fb = find_phrase(transcript, unit, threshold=0.62)
+    if not fb:
+        return None
+    sc, k0, k1 = fb
+    # extender a repeticiones contiguas de la unidad dentro del transcript
+    L = len(collapsed)
+    T = len(transcript)
+    qn = collapsed
+    while k1 + L < T:
+        win = [norm(str(w.get("word", ""))) for w in transcript[k1 + 1:k1 + 1 + L]]
+        if all(a == b for a, b in zip(qn, win)):
+            sc2 = 1.0
+        else:
+            sc2 = sum(fuzz.ratio(a, b) / 100.0 for a, b in zip(qn, win)) / L
+        if sc2 >= 0.62:
+            k1 += L
+        else:
+            break
+    return (sc, k0, k1)
 
 
 def find_occurrences(transcript, j0, j1, threshold=0.72):
