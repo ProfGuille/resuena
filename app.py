@@ -6,6 +6,7 @@ su propia selección y genera un audio corto con solo las frases elegidas.
 """
 import hashlib
 import os
+import queue
 import re
 import shutil
 import threading
@@ -14,7 +15,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -56,23 +57,74 @@ def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# ---------------------------------------------------------------- cola de análisis
+# El CPU del plan free es limitado: se procesa UNA canción por vez.
+_proc_lock = threading.Lock()
+_proc_queue = queue.Queue()
+_proc_worker_started = False
+
+
+def process_song(sid):
+    """Encola el análisis de una canción (se procesa de a una por vez)."""
+    global _proc_worker_started
+    with _proc_lock:
+        if not _proc_worker_started:
+            threading.Thread(target=_proc_worker, daemon=True).start()
+            _proc_worker_started = True
+    _proc_queue.put(sid)
+
+
+def _proc_worker():
+    while True:
+        sid = _proc_queue.get()
+        try:
+            song = store.get_song(sid)
+            if song and song.get("status") != "ready":
+                _process_song_impl(sid)
+        except Exception:
+            pass
+        finally:
+            _proc_queue.task_done()
+
+
+def _set_phase(sid, phase):
+    try:
+        song = store.get_song(sid)
+        if song:
+            song["phase"] = phase
+            store.save_song(sid, song)
+    except Exception:
+        pass
+
+
+def _upload_src_safe(sid, src_path, ext):
+    """Guarda el archivo original en la nube (para poder retomar si se reinicia)."""
+    if not media.persistent():
+        return
+    try:
+        media.put_file(f"src/{sid}{ext}", src_path)
+    except Exception:
+        pass
+
+
 def _recover_stuck_songs():
     """Al arrancar: canciones que quedaron 'processing' por un reinicio.
-    Las de YouTube o las que tienen el original guardado en la nube se
-    vuelven a procesar; el resto se marca con un mensaje claro."""
+    Se re-encolan en la cola de análisis (una por vez); las que no tienen
+    cómo retomarse se marcan con un mensaje claro."""
     try:
         for sid, song in store.all_songs().items():
             if song.get("status") != "processing":
                 continue
             if song.get("source") == "youtube":
-                threading.Thread(target=process_song, args=(sid,), daemon=True).start()
+                process_song(sid)
             elif media.persistent() and song.get("source_ext"):
                 # el original quedó guardado en la nube: se puede retomar el análisis
-                threading.Thread(target=process_song, args=(sid,), daemon=True).start()
+                process_song(sid)
             else:
                 song["status"] = "error"
                 song["error"] = ("El análisis se interrumpió (el servidor se reinició "
                                  "durante el procesamiento). Volvé a subir la canción.")
+                song["phase"] = None
                 store.save_song(sid, song)
     except Exception:
         pass
@@ -127,6 +179,7 @@ def list_songs():
             "title": s.get("title") or "Sin título",
             "artist": s.get("artist"),
             "status": s.get("status"),
+            "phase": s.get("phase"),
             "error": s.get("error"),
             "duration": s.get("duration"),
             "source": s.get("source"),
@@ -154,6 +207,7 @@ async def create_song(
     language: str = Form(""),
     youtube_url: str = Form(""),
     file: UploadFile = File(None),
+    background_tasks: BackgroundTasks = None,
 ):
     lyrics = (lyrics or "").strip()
     if not lyrics:
@@ -172,6 +226,7 @@ async def create_song(
         "source": "file" if file else "youtube",
         "youtube_url": url or None,
         "status": "processing",
+        "phase": "encolado",
         "error": None,
         "duration": None,
         "created_at": now_iso(),
@@ -183,6 +238,7 @@ async def create_song(
         "source_path": None,
     }
 
+    src = None
     try:
         if file:
             ext = os.path.splitext(file.filename or "")[1].lower()
@@ -192,13 +248,16 @@ async def create_song(
             with open(src, "wb") as fh:
                 shutil.copyfileobj(file.file, fh)
             song["source_path"] = str(src)
+            song["source_ext"] = ext
+            # subir el original a la nube en segundo plano (no bloquea la respuesta)
+            background_tasks.add_task(_upload_src_safe, sid, str(src), ext)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(400, f"No se pudo guardar el archivo: {e}")
 
     store.save_song(sid, song)
-    threading.Thread(target=process_song, args=(sid,), daemon=True).start()
+    process_song(sid)
     return {"id": sid}
 
 
@@ -418,10 +477,11 @@ def render_file(sid: str, fname: str):
 
 
 # ---------------------------------------------------------------- proceso
-def process_song(sid):
+def _process_song_impl(sid):
     """Corre en segundo plano: descarga, convierte, transcribe y alinea."""
     song = store.get_song(sid)
     try:
+        _set_phase(sid, "descargando")
         src = song.get("source_path")
         if song["source"] == "youtube":
             path, yt_title, yt_artist = au.download_youtube(
@@ -454,6 +514,7 @@ def process_song(sid):
         au.to_streaming_mp3(str(src), str(mp3))
         song["duration"] = au.ffprobe_duration(str(mp3))
         if media.persistent():
+            _set_phase(sid, "guardando")
             media.put_file(f"song/{sid}.mp3", str(mp3))
         # el archivo fuente original ya no hace falta (se usó para convertir)
         try:
@@ -462,6 +523,7 @@ def process_song(sid):
         except OSError:
             pass
 
+        _set_phase(sid, "transcribiendo")
         model = get_model()
         lang = song["language"] or None
         # vad_filter=False: el filtro de voz descartaba partes cantadas de las
@@ -499,11 +561,13 @@ def process_song(sid):
         song["detected_lang"] = info.language
         song["transcript_words"] = words
         song["status"] = "ready"
+        song["phase"] = "listo"
         store.save_song(sid, song)
     except Exception as e:
         song = store.get_song(sid)
         song["status"] = "error"
         song["error"] = str(e)[:500]
+        song["phase"] = None
         store.save_song(sid, song)
 
 
