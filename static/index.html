@@ -204,8 +204,9 @@
   .selpanel .check input{accent-color:var(--accent)}
   .saveinfo{font-size:11.5px;color:var(--muted);margin:8px 0 12px;height:14px}
   .renderbox{margin-top:14px}
-  .renderbox audio{width:100%;margin-top:10px}
-  .renderbox .dl{margin-top:10px;display:inline-flex;align-items:center;gap:7px;
+  .rb-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .rb-actions audio{flex:1;min-width:200px}
+  .renderbox .dl{display:inline-flex;align-items:center;gap:7px;
     background:linear-gradient(135deg,rgba(124,92,255,.25),rgba(34,211,238,.2));
     border:1px solid var(--accent);color:var(--text);border-radius:10px;
     padding:9px 14px;font-size:13px;font-weight:600}
@@ -295,14 +296,23 @@
       <div class="legend" id="legend" style="display:none">
         <span class="lg lg-sel">seleccionada</span>
         <span class="lg lg-nohit">⚠ sin audio asociado</span>
-        <span class="lg">🖱 clic o arrastre" id="statSel">Ninguna palabra seleccionada todavía.</p>
+        <span class="lg">🖱 clic o arrastre para pintar</span>
+      </div>
+    </div>
+
+    <aside class="selpanel">
+      <h3>🎨 Mis frases seleccionadas</h3>
+      <p class="stat" id="statSel">Ninguna palabra seleccionada todavía.</p>
       <label class="check"><input type="checkbox" id="allOcc"> Incluir <b>todas las apariciones</b> de cada frase (ej. coros que se repiten)</label>
       <p class="saveinfo" id="saveInfo"></p>
       <button class="btn primary" id="btnRender" style="width:100%" onclick="generateRender()">🎬 Generar audio con mis frases</button>
       <p class="nohint" id="noHitHint">⚠ Algunas frases no tienen audio asociado (la letra no coincide con lo que se canta).</p>
       <div class="renderbox" id="renderBox" style="display:none">
-        <audio id="selAudio" controls preload="metadata"></audio>
-        <a class="dl" id="dlLink" download>⬇ Descargar MP3</a>
+        <div class="rb-actions">
+          <audio id="selAudio" controls preload="metadata"></audio>
+          <button class="btn primary sm" id="btnSelPlay" onclick="toggleSelPlay()">▶ Escuchar</button>
+          <a class="dl" id="dlLink" download>⬇ Descargar MP3</a>
+        </div>
         <p class="note" id="renderNote"></p>
         <p class="note" id="renderWarn" style="color:#ffb3b3;display:none"></p>
       </div>
@@ -380,10 +390,8 @@ const state = {
   uid: (localStorage.getItem('lm_uid') || (localStorage.setItem('lm_uid', Math.random().toString(36).slice(2,10)), localStorage.getItem('lm_uid'))),
   dirty: false,
 };
-const selAudio = new Audio();
-selAudio.addEventListener('ended', () => { if (state.mode==='sel') $('btnPlay').textContent = '▶'; });
+let selAudio = null; // se vincula al <audio> del panel en setupSelAudio()
 $('userPill').textContent = '👤 usuario ' + state.uid;
-$('selAudio').src = ''; // se setea al renderizar
 
 async function api(path, opts){
   const r = await fetch(path, opts);
@@ -411,6 +419,8 @@ async function loadStorageInfo(){
       el.textContent = '⚠ Almacenamiento local: las canciones se pierden al reiniciar. Configurá GITHUB_TOKEN y GITHUB_REPO en Render para que persistan.';
       el.style.color = '#ffb3b3';
     }
+    const v = h.version ? ' · v' + h.version : '';
+    el.textContent += v;
   } catch(e){}
 }
 
@@ -500,8 +510,8 @@ async function openSong(id){
       renderSong();
     }
   } catch(e){
-    showErr(e.message);
-    showLib();  // si el enlace no existe, volver a la biblioteca
+    showErr(e.message || 'Error al cargar la canción.');
+    $('lyricsBox').innerHTML = '<p class="hint">No se pudo cargar la canción. Tocá ← para volver a la biblioteca y reintentá.</p>';
   }
 }
 function showErr(msg){
@@ -729,19 +739,44 @@ fullAudio.addEventListener('timeupdate', () => {
 });
 fullAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(fullAudio.duration); });
 fullAudio.addEventListener('ended', () => { $('btnPlay').textContent = '▶'; $('seekBar').value = 0; });
-selAudio.addEventListener('timeupdate', () => {
-  if (state.mode !== 'sel') return;
-  if (selAudio.duration) $('seekBar').value = selAudio.currentTime / selAudio.duration * 100;
-  $('curTime').textContent = fmt(selAudio.currentTime);
-});
-selAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(selAudio.duration); });
-selAudio.addEventListener('error', () => {
-  if (state.selUrl){
+fullAudio.addEventListener('error', () => {
+  if (state.mode === 'full' && !fullAudio.src.includes('blob:')){
     const w = $('renderWarn');
-    w.textContent = 'El audio anterior se perdió (el servidor se durmió o se actualizó). Tocá de nuevo "Generar audio con mis frases".';
+    w.textContent = '⚠ No se pudo cargar el audio de la canción (el servidor se reinició). Volvé a abrir la canción para recuperarlo.';
     w.style.display = '';
   }
 });
+
+/* Un solo reproductor para las frases: el <audio> del panel */
+function setupSelAudio(){
+  selAudio = $('selAudio');
+  selAudio.addEventListener('ended', () => {
+    if (state.mode==='sel') $('btnPlay').textContent = '▶';
+    $('btnSelPlay').textContent = '▶ Escuchar';
+  });
+  selAudio.addEventListener('play', () => {
+    fullAudio.pause();
+    $('btnSelPlay').textContent = '⏸ Pausar';
+    if (state.mode==='sel') $('btnPlay').textContent = '⏸';
+  });
+  selAudio.addEventListener('pause', () => {
+    $('btnSelPlay').textContent = '▶ Escuchar';
+    if (state.mode==='sel') $('btnPlay').textContent = '▶';
+  });
+  selAudio.addEventListener('timeupdate', () => {
+    if (state.mode !== 'sel') return;
+    if (selAudio.duration) $('seekBar').value = selAudio.currentTime / selAudio.duration * 100;
+    $('curTime').textContent = fmt(selAudio.currentTime);
+  });
+  selAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(selAudio.duration); });
+  selAudio.addEventListener('error', () => {
+    if (state.selUrl){
+      const w = $('renderWarn');
+      w.textContent = 'El audio anterior se perdió (el servidor se reinició o se durmió). Tocá de nuevo "Generar audio con mis frases".';
+      w.style.display = '';
+    }
+  });
+}
 
 function setupFullAudio(){
   fullAudio.pause(); fullAudio.src = '';
@@ -752,21 +787,27 @@ function setMode(m){
   state.mode = m;
   $('modeFull').classList.toggle('on', m==='full');
   $('modeSel').classList.toggle('on', m==='sel');
-  const paused = m==='full' ? fullAudio.paused : selAudio.paused;
+  const paused = m==='full' ? fullAudio.paused : (selAudio ? selAudio.paused : true);
   $('btnPlay').textContent = paused ? '▶' : '⏸';
 }
 function togglePlay(){
-  if (state.mode === 'sel' && state.selUrl){
-    if (selAudio.paused){ selAudio.play(); $('btnPlay').textContent='⏸'; }
-    else { selAudio.pause(); $('btnPlay').textContent='▶'; }
+  if (state.mode === 'sel' && state.selUrl && selAudio){
+    if (selAudio.paused){ fullAudio.pause(); selAudio.play().catch(()=>{}); }
+    else { selAudio.pause(); }
   } else {
+    if (selAudio) selAudio.pause();
     if (fullAudio.paused){ fullAudio.play(); $('btnPlay').textContent='⏸'; }
     else { fullAudio.pause(); $('btnPlay').textContent='▶'; }
   }
 }
+function toggleSelPlay(){
+  if (!selAudio || !state.selUrl) return;
+  if (selAudio.paused){ selAudio.play().catch(()=>{}); }
+  else { selAudio.pause(); }
+}
 function onSeek(v){
   const pct = v/100;
-  if (state.mode==='sel' && state.selUrl && selAudio.duration) selAudio.currentTime = pct*selAudio.duration;
+  if (state.mode==='sel' && state.selUrl && selAudio && selAudio.duration) selAudio.currentTime = pct*selAudio.duration;
   else if (fullAudio.duration) fullAudio.currentTime = pct*fullAudio.duration;
 }
 
@@ -786,7 +827,7 @@ async function previewLine(li){
     state.selUrl = j.url;
     setMode('sel');
     selAudio.load();
-    selAudio.play().then(()=>{ $('btnPlay').textContent='⏸'; }).catch(()=>{});
+    selAudio.play().catch(()=>{});
   } catch(e){ $('renderErr').textContent = e.message; $('renderErr').style.display = ''; }
 }
 
@@ -807,7 +848,6 @@ async function generateRender(){
     const u = j.url + '?v=' + Date.now();
     selAudio.src = u;
     state.selUrl = j.url;
-    $('selAudio').src = u;
     $('dlLink').href = u;
     $('renderNote').textContent = `${j.segments} fragmento${j.segments===1?'':'s'} · ${fmt(j.duration)} de audio`;
     const w = $('renderWarn');
@@ -818,6 +858,7 @@ async function generateRender(){
       w.style.display = 'none';
     }
     $('renderBox').style.display = '';
+    $('btnSelPlay').textContent = '▶ Escuchar';
     setMode('sel');
     $('btnPlay').textContent='▶';
   } catch(e){
@@ -928,6 +969,7 @@ async function shareSongId(id){
 
 /* ============================================================ init */
 (function init(){
+  setupSelAudio();
   loadStorageInfo();
   const sp = new URLSearchParams(location.search);
   const sidParam = sp.get('song');
