@@ -303,9 +303,81 @@ def align_lines(lines, transcript, segments=None):
         orig["tj"] = tj
         orig["sim"] = round(s, 2)
 
+    # ---- Descartar anclas dispersas (matches falsos) ---------------------
+    # El emparejamiento global a veces une una palabra de la letra con una
+    # palabra del transcript que está a SEGUNDOS de la anterior (el modelo
+    # tiny transcribió mal esa parte y el DP forzó el match a otra sección,
+    # p. ej. a un coro). Eso abría frases de pocas palabras durante 20 s y el
+    # render incluía audio de las frases siguientes ("no frenó en la
+    # selección"). Si dos palabras CONSECUTIVAS de la misma línea quedaron
+    # emparejadas con un salto de más de GAP_MAX segundos, el match de la
+    # segunda es falso: se descarta y se rellena por interpolación desde las
+    # anclas reales.
+    GAP_MAX = 2.0
+    for line in lines:
+        anchor_end = None
+        for w in line["words"]:
+            tj = w.get("tj")
+            if w.get("m") and tj is not None:
+                t_start = tw[tj][1]
+                t_end = tw[tj][2]
+                if anchor_end is None:
+                    anchor_end = t_end
+                elif t_start - anchor_end > GAP_MAX:
+                    w["m"] = False
+                    w["tj"] = None
+                    w["s"] = None
+                    w["e"] = None
+                else:
+                    anchor_end = t_end
+
     # Relleno por interpolación en líneas parcialmente ubicadas
     for line in lines:
         _interpolate_line(line)
+
+    # ---- Anclar bordes interpolados a su match real ----------------------
+    # Cuando el borde de una línea quedó interpolado (sin match), buscamos en
+    # el transcript, CERCA de la posición interpolada, la palabra que más se
+    # parezca a la primera/última de la línea y la usamos como ancla: así el
+    # corte del render no se pasa de la frase (el problema "continuó con todo
+    # el párrafo"). Solo si la similitud es alta y está cerca.
+    for line in lines:
+        changed = False
+        for edge_idx in (0, -1):
+            w = line["words"][edge_idx]
+            if not w.get("m") or w.get("tj") is not None:
+                continue
+            if w.get("s") is None:
+                continue
+            target = norm(w["raw"])
+            if not target:
+                continue
+            lo = w["s"] - 1.2
+            hi = w["e"] + 1.2
+            best = None
+            for j, (tword, t0, t1) in enumerate(tw):
+                if t0 < lo or t0 > hi or t1 <= t0:
+                    continue
+                sim = fuzz.ratio(target, tword) / 100.0
+                if best is None or sim > best[0]:
+                    best = (sim, j, t0, t1)
+            if best and best[0] >= 0.80:
+                _, j, t0, t1 = best
+                w["tj"] = j
+                w["s"] = t0
+                w["e"] = t1
+                w["sim"] = round(max(best[0], 0.5), 2)
+                changed = True
+        if changed:
+            # el nuevo ancla cambió los límites: descartar los tiempos
+            # interpolados (ya no cuadran) y rellenar de nuevo el interior
+            for w in line["words"]:
+                if w.get("tj") is None:
+                    w["m"] = False
+                    w["s"] = None
+                    w["e"] = None
+                    w["sim"] = 0.5
+            _interpolate_line(line)
 
     # Respaldo: buscar cada línea sin ubicar como ventana fuzzy en el transcript
     _line_window_match(lines, transcript)

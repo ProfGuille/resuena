@@ -39,9 +39,9 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v12"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
-ALIGN_VERSION = 2  # versión del pipeline de alineación: si una canción lista tiene
-                   # align_v != 2, se re-analiza sola al arrancar (transcript mejorado)
+VERSION = "v13"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
+                   # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
 ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus",
                 ".webm", ".mp4", ".mov", ".mpeg", ".mpga", ".oga"}
@@ -635,6 +635,26 @@ def render(sid: str, payload: dict):
                     if e0 - s0 > 0.05:
                         segments.append((s0, e0))
             else:
+                # robustez: si los timestamps del tramo son inverosímiles
+                # (huecos enormes entre palabras contiguas -> el align unió la
+                # frase con audio de otra sección), dividir en los huecos y
+                # quedarse con el sub-tramo más denso en vez de emitir un
+                # segmento gigante con audio de otras frases.
+                if len(run) > 1:
+                    subs = []
+                    cur = [run[0]]
+                    for k in range(1, len(run)):
+                        if run[k]["s"] - run[k - 1]["e"] > 2.5:
+                            subs.append(cur)
+                            cur = [run[k]]
+                        else:
+                            cur.append(run[k])
+                    subs.append(cur)
+                    dense = max(subs, key=lambda s: len(s))
+                    if len(dense) >= 2:
+                        run = dense
+                    else:
+                        run = max(subs, key=lambda s: (s[-1]["e"] - s[0]["s"]))
                 n = len(run)
                 if n <= 2:
                     # selección corta (una/dos palabras): cortar EXACTO,
