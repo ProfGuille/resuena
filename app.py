@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v14"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v15"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -97,8 +97,15 @@ def get_model():
         if _model is None:
             from faster_whisper import WhisperModel
             chosen = _pick_model()
-            print(f"cargando modelo Whisper: {chosen}", flush=True)
-            _model = WhisperModel(chosen, device="cpu", compute_type="int8")
+            # si el modelo vino horneado en el build (models/), cargarlo desde
+            # ahí: sin red, sin pico de memoria por descarga, arranque rápido
+            local = BASE / "models" / f"faster-whisper-{chosen}"
+            if local.exists():
+                print(f"cargando modelo Whisper: {chosen} (desde build)", flush=True)
+                _model = WhisperModel(str(local), device="cpu", compute_type="int8")
+            else:
+                print(f"cargando modelo Whisper: {chosen} (descarga)", flush=True)
+                _model = WhisperModel(chosen, device="cpu", compute_type="int8")
         return _model
 
 
@@ -222,6 +229,18 @@ async def lifespan(app):
     store.init()          # memoria desde disco + GitHub (rápido, sin red en lecturas)
     _recover_stuck_songs()
     _recheck_align()
+
+    # warm-up del modelo en segundo plano: la descarga/carga del modelo Whisper
+    # empieza apenas arranca el proceso (y queda lista para la primera canción),
+    # en vez de hacerse en medio del procesamiento (que causaba picos de memoria
+    # y 502). Si el modelo está horneado en el build, esto es instantáneo.
+    def _warm():
+        try:
+            get_model()
+            print("modelo Whisper listo (warm-up)", flush=True)
+        except Exception as e:
+            print("warm-up del modelo falló: " + str(e)[:200], flush=True)
+    threading.Thread(target=_warm, daemon=True).start()
     yield
 
 
