@@ -389,6 +389,8 @@ const state = {
   timer: null,
   uid: (localStorage.getItem('lm_uid') || (localStorage.setItem('lm_uid', Math.random().toString(36).slice(2,10)), localStorage.getItem('lm_uid'))),
   dirty: false,
+  dragMoved: false,
+  dragPreview: null,
 };
 let selAudio = null; // se vincula al <audio> del panel en setupSelAudio()
 $('userPill').textContent = '👤 usuario ' + state.uid;
@@ -482,6 +484,7 @@ function renderLibrary(){
 /* ============================================================ editor */
 async function openSong(id){
   showEditor();
+  dragStart = null; state.dragMoved = false; state.dragPreview = null;
   state.song = null; state.sel = []; state.selUrl = null; state.mode = 'full';
   $('lyricsBox').innerHTML = '<p class="hint">Cargando…</p>';
   $('playerBox').style.display = 'none';
@@ -597,14 +600,41 @@ function extendTo(i){
   if (state.anchor === null) return toggleWord(i);
   replaceRange(Math.min(state.anchor, i), Math.max(state.anchor, i));
 }
+/* Fusiona rangos ordenados: [0,2] + [3,5] -> [0,5]; solapados -> uno solo */
+function mergeRanges(rs){
+  if (!rs.length) return [];
+  const sorted = rs.slice().sort((p,q)=>p[0]-q[0]);
+  const out = [];
+  for (const [a,b] of sorted){
+    const last = out[out.length-1];
+    if (last && a <= last[1] + 1){ last[1] = Math.max(last[1], b); }
+    else out.push([a, b]);
+  }
+  return out;
+}
+/* Arrastrar AGREGUA a la selección (no borra lo pintado antes) */
+function addRange(a,b){
+  state.sel = mergeRanges(state.sel.concat([[a,b]]));
+  state.anchor = b;
+  paint(); scheduleSave();
+}
 
 function paint(){
   // clases en palabras y líneas
   const selSet = new Set();
   state.sel.forEach(([a,b]) => { for (let i=a;i<=b;i++) selSet.add(i); });
+  const dragSet = new Set();
+  if (state.dragMoved && state.dragPreview){
+    const [da,db] = state.dragPreview;
+    for (let i=da;i<=db;i++) dragSet.add(i);
+  }
   const wEls = document.querySelectorAll('.word');
   let i = 0;
-  for (const el of wEls){ el.classList.toggle('sel', selSet.has(i++)); }
+  for (const el of wEls){
+    el.classList.toggle('sel', selSet.has(i));
+    el.classList.toggle('drag', dragSet.has(i));
+    i++;
+  }
   document.querySelectorAll('.line').forEach((ln, li) => {
     const line = (state.song.lines || [])[li];
     const selIn = line.words.some((_, wi) => { let k=0; for(let l2=0;l2<li;l2++) k+=state.song.lines[l2].words.length; return selSet.has(k+wi); });
@@ -653,33 +683,52 @@ function renderSong(){
   setMode('full');
 }
 
-/* ---------- selección por arrastre ---------- */
+/* ---------- selección por arrastre ----------
+ * El arrastre AGREGUA a la selección (no borra lo pintado antes) y funciona
+ * aunque el mouseup caiga fuera de una palabra (se busca la palabra bajo el
+ * cursor con elementFromPoint; si se suelta fuera, se cancela sin cambios).
+ */
 let dragStart = null;
+function wordAt(x, y){
+  const el = document.elementFromPoint(x, y);
+  if (!el || !el.closest) return null;
+  const w = el.closest('.word');
+  return w ? parseInt(w.dataset.i, 10) : null;
+}
 document.addEventListener('mousedown', e => {
+  if (state.view !== 'editor' || e.button !== 0) return;
   const w = e.target.closest('.word');
-  if (w && state.view==='editor') dragStart = parseInt(w.dataset.i, 10);
+  if (!w) return;
+  dragStart = parseInt(w.dataset.i, 10);
+  state.dragMoved = false;
+  state.dragPreview = [dragStart, dragStart];
+  e.preventDefault(); // evita que el navegador seleccione texto al arrastrar
 });
-document.addEventListener('mouseup', e => {
+document.addEventListener('mousemove', e => {
   if (dragStart === null) return;
-  const w = e.target.closest('.word');
-  if (w){
-    const i = parseInt(w.dataset.i, 10);
-    if (i === dragStart){
-      if (e.shiftKey) extendTo(i);
-      else if (e.ctrlKey || e.metaKey) toggleWord(i);
-      else toggleWord(i);
-    } else {
-      if (e.shiftKey){
-        const a = Math.min(dragStart, i), b = Math.max(dragStart, i);
-        state.sel.push([a,b]);
-        state.sel.sort((p,q)=>p[0]-q[0]);
-        state.anchor = i; paint(); scheduleSave();
-      } else {
-        replaceRange(dragStart, i);
-      }
-    }
+  const i = wordAt(e.clientX, e.clientY);
+  if (i === null || i === dragStart) return;
+  state.dragMoved = true;
+  state.dragPreview = [Math.min(dragStart, i), Math.max(dragStart, i)];
+  paint();
+});
+window.addEventListener('mouseup', e => {
+  if (dragStart === null) return;
+  const from = dragStart, moved = state.dragMoved;
+  dragStart = null; state.dragPreview = null; state.dragMoved = false;
+  paint();
+  const i = wordAt(e.clientX, e.clientY);
+  if (i === null){
+    return; // se soltó fuera de las palabras: no se cambia nada
   }
-  dragStart = null;
+  if (!moved || i === from){
+    // clic simple (sin arrastre)
+    if (e.shiftKey) extendTo(i);
+    else toggleWord(i);
+    return;
+  }
+  // arrastre real: agregar el rango a lo ya pintado
+  addRange(Math.min(from, i), Math.max(from, i));
 });
 
 /* ---------- estadísticas / guardado ---------- */
@@ -981,5 +1030,6 @@ async function shareSongId(id){
   }
 })();
 </script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a33d75c97c1c0ebf',t:'MTc4ODE5NDI0OQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v3d52b47920f24c319d37e2661827c42b1787588026925" integrity="sha512-d9sL6GJLXn6fInD1+TVXhTcQOsmxeHfmHAvwGDIxp5TO+uo1fiWW7mHomMj4MLRlCsJDTqXzWLHJFFlPCEIj/A==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f"}' crossorigin="anonymous"></script>
 </body>
 </html>
