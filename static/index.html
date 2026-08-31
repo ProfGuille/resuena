@@ -803,6 +803,8 @@ function estSelDur(){
   const en = Math.max(...hit.map(w=>w.e));
   return en - st + 0.4;
 }
+function inSel(i){ return state.sel.some(([a,b]) => a<=i && i<=b); }
+function selCount(){ return flatWords().filter((_,i)=>inSel(i)).length; }
 function updateStats(){
   const total = flatWords().length;
   const n = selCount();
