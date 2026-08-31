@@ -215,6 +215,15 @@
   .nohint{color:#b08a5a;font-size:12px;margin-top:8px;display:none}
 
   footer{color:#46557a;font-size:12px;text-align:center;padding:40px 20px 20px}
+
+  /* ---------- lluvia de frases ---------- */
+  .rain-overlay{position:fixed;inset:0;pointer-events:none;z-index:9999;overflow:hidden;display:none}
+  .rain-overlay.on{display:block}
+  .raindrop{position:absolute;top:-70px;white-space:nowrap;font-weight:800;letter-spacing:.5px;
+    color:var(--sel);text-shadow:0 0 14px rgba(255,209,102,.6),0 3px 8px rgba(0,0,0,.65);
+    opacity:0;animation:rainfall linear forwards;will-change:transform,opacity;line-height:1.1}
+  @keyframes rainfall{0%{transform:translateY(0) rotate(var(--rot,0deg)) scale(.9);opacity:0}
+    8%{opacity:.95}90%{opacity:.85}100%{transform:translateY(118vh) rotate(var(--rot,0deg)) scale(1.05);opacity:0}}
 </style>
 </head>
 <body>
@@ -374,6 +383,8 @@
     <p class="note" id="upNote"></p>
   </div>
 </div>
+
+<div class="rain-overlay" id="rainOverlay"></div>
 
 <script>
 /* ============================================================ estado */
@@ -566,10 +577,51 @@ function flatWords(){
   (state.song.lines || []).forEach((l, li) => l.words.forEach((w, wi) => out.push({li, wi, w})));
   return out;
 }
-function inSel(i){ return state.sel.some(([a,b]) => a<=i && i<=b); }
-function selCount(){ return flatWords().filter((_,i)=>inSel(i)).length; }
-function selRangesFlat(){ return state.sel.map(([a,b]) => [a,b]); }
 
+/* ---------- lluvia de frases ---------- */
+let _rainTimer = null;
+function rainPhrases(){
+  if (!state.song || !state.sel || !state.sel.length) return [];
+  const flat = flatWords();
+  const frases = [];
+  for (const [a, b] of state.sel){
+    const ws = flat.slice(a, b + 1).map(f => (f.w.raw || '').trim()).filter(Boolean);
+    if (ws.length) frases.push(ws.join(' '));
+  }
+  return frases;
+}
+function spawnRainDrop(phrases){
+  const ov = $('rainOverlay');
+  if (!ov || !phrases.length) return;
+  const fr = phrases[Math.floor(Math.random() * phrases.length)];
+  const d = document.createElement('div');
+  d.className = 'raindrop';
+  d.textContent = fr;
+  d.style.left = (Math.random() * 94) + 'vw';
+  d.style.fontSize = (20 + Math.random() * 30) + 'px';       // 20-50 px, bien destacado
+  d.style.setProperty('--rot', (Math.random() * 50 - 25) + 'deg');
+  const dur = 3.5 + Math.random() * 4.5;                     // 3.5-8 s de caída
+  d.style.animationDuration = dur + 's';
+  ov.appendChild(d);
+  setTimeout(() => d.remove(), dur * 1000 + 300);
+}
+function startRain(){
+  const phrases = rainPhrases();
+  if (!phrases.length) return;
+  const ov = $('rainOverlay');
+  if (!ov) return;
+  ov.classList.add('on');
+  if (_rainTimer) clearInterval(_rainTimer);
+  for (let i = 0; i < 10; i++) spawnRainDrop(phrases);       // lote inicial
+  _rainTimer = setInterval(() => { spawnRainDrop(phrases); spawnRainDrop(phrases); }, 800);
+}
+function stopRain(){
+  if (_rainTimer){ clearInterval(_rainTimer); _rainTimer = null; }
+  const ov = $('rainOverlay');
+  if (!ov) return;
+  ov.classList.remove('on');
+  ov.innerHTML = '';
+}
 function toggleWord(i){
   const fi = state.sel.findIndex(([a,b]) => a<=i && i<=b);
   if (fi >= 0){
@@ -802,15 +854,18 @@ function setupSelAudio(){
   selAudio.addEventListener('ended', () => {
     if (state.mode==='sel') $('btnPlay').textContent = '▶';
     $('btnSelPlay').textContent = '▶ Escuchar';
+    stopRain();
   });
   selAudio.addEventListener('play', () => {
     fullAudio.pause();
     $('btnSelPlay').textContent = '⏸ Pausar';
     if (state.mode==='sel') $('btnPlay').textContent = '⏸';
+    startRain();
   });
   selAudio.addEventListener('pause', () => {
     $('btnSelPlay').textContent = '▶ Escuchar';
     if (state.mode==='sel') $('btnPlay').textContent = '▶';
+    stopRain();
   });
   selAudio.addEventListener('timeupdate', () => {
     if (state.mode !== 'sel') return;
@@ -1030,6 +1085,5 @@ async function shareSongId(id){
   }
 })();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a33d910e292dc7a9',t:'MTc4ODE5NTM2Ng=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v3d52b47920f24c319d37e2661827c42b1787588026925" integrity="sha512-d9sL6GJLXn6fInD1+TVXhTcQOsmxeHfmHAvwGDIxp5TO+uo1fiWW7mHomMj4MLRlCsJDTqXzWLHJFFlPCEIj/A==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f"}' crossorigin="anonymous"></script>
 </body>
 </html>
