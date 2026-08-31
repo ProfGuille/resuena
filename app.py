@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v15"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v16"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -635,6 +635,46 @@ def render(sid: str, payload: dict):
                 if e0 - s0 > 0.05:
                     segments.append((s0, e0))
                     continue
+            # respaldo POSICIONAL: la frase no aparece en el transcript ni
+            # siquiera en otra aparición (el coro "Kyrie Eleison" quedó como
+            # "unirilé y sol"). Pero SABEMOS dónde está en la canción: entre
+            # la última palabra con audio que viene antes y la primera con
+            # audio que viene después. Repartimos ese hueco proporcionalmente
+            # entre las palabras de la letra sin audio que hay en el medio.
+            prev_i = a - 1
+            while prev_i >= 0 and not flat[prev_i][2].get("m"):
+                prev_i -= 1
+            nxt_i = b + 1
+            while nxt_i < total and not flat[nxt_i][2].get("m"):
+                nxt_i += 1
+            if prev_i >= 0 and nxt_i < total:
+                pv = flat[prev_i][2]
+                nx = flat[nxt_i][2]
+                if pv.get("e") is not None and nx.get("s") is not None:
+                    gap_words = nxt_i - prev_i - 1
+                    sel_words = b - a + 1
+                    gap_s = float(pv["e"])
+                    gap_e = float(nx["s"])
+                    gap_dur = gap_e - gap_s
+                    # sel == gap_words: la selección es TODO el hueco (caso
+                    # típico de elegir una línea completa sin audio). Solo se
+                    # acepta si el hueco no es enorme: un hueco grande casi
+                    # siempre mezcla instrumental/otras frases, y dar el hueco
+                    # entero sonaría a otra cosa.
+                    whole_gap = sel_words >= gap_words
+                    if (gap_words >= 1 and sel_words >= 1
+                            and (sel_words < gap_words
+                                 or (whole_gap and gap_dur <= 20.0))):
+                        # umbral de confianza: el hueco no puede ser enorme
+                        # (sería instrumental/silencio, no la frase)
+                        if 0.2 < gap_dur <= 60 and gap_dur / gap_words <= 6.0:
+                            off0 = a - prev_i - 1
+                            off1 = b - prev_i
+                            s0 = max(0.0, gap_s + (off0 / gap_words) * gap_dur)
+                            e0 = min(dur, gap_s + (off1 / gap_words) * gap_dur)
+                            if e0 - s0 > 0.05:
+                                segments.append((s0, e0))
+                                continue
             skipped += 1
             continue
 
