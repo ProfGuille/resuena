@@ -260,6 +260,7 @@
     <span class="chip" id="edCov"></span>
     <span class="chip" id="edSrc"></span>
     <div style="flex:1"></div>
+    <button class="btn ghost sm" id="btnShare" onclick="shareSong()" title="Copiar enlace directo a esta canción">🔗 Compartir</button>
     <button class="btn danger sm" onclick="deleteCurrent()">🗑 Eliminar</button>
   </div>
 
@@ -294,13 +295,7 @@
       <div class="legend" id="legend" style="display:none">
         <span class="lg lg-sel">seleccionada</span>
         <span class="lg lg-nohit">⚠ sin audio asociado</span>
-        <span class="lg">🖱 clic o arrastre para pintar</span>
-      </div>
-    </div>
-
-    <aside class="selpanel">
-      <h3>🎨 Mis frases seleccionadas</h3>
-      <p class="stat" id="statSel">Ninguna palabra seleccionada todavía.</p>
+        <span class="lg">🖱 clic o arrastre" id="statSel">Ninguna palabra seleccionada todavía.</p>
       <label class="check"><input type="checkbox" id="allOcc"> Incluir <b>todas las apariciones</b> de cada frase (ej. coros que se repiten)</label>
       <p class="saveinfo" id="saveInfo"></p>
       <button class="btn primary" id="btnRender" style="width:100%" onclick="generateRender()">🎬 Generar audio con mis frases</button>
@@ -448,6 +443,7 @@ function renderLibrary(){
             : st==='error'
               ? `<button class="btn danger sm" onclick="openSong('${s.id}')">Ver error</button>`
               : `<button class="btn ghost sm" disabled>Procesando…</button>`}
+          <button class="btn ghost sm" onclick="shareSongId('${s.id}')" title="Copiar enlace directo a esta canción">🔗</button>
           <button class="btn danger sm" onclick="delSong('${s.id}')" title="Eliminar">🗑</button>
         </div>
       </div>
@@ -484,7 +480,10 @@ async function openSong(id){
       await loadSel(id);
       renderSong();
     }
-  } catch(e){ showErr(e.message); }
+  } catch(e){
+    showErr(e.message);
+    showLib();  // si el enlace no existe, volver a la biblioteca
+  }
 }
 function showErr(msg){
   $('errBanner').textContent = '⚠ ' + msg;
@@ -860,8 +859,46 @@ async function submitUpload(){
   }
 }
 
+/* ============================================================ compartir */
+function shareLink(id){ return location.origin + location.pathname + '?song=' + id; }
+async function copyText(t){
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch(e){
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = t; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      return true;
+    } catch(_){ return false; }
+  }
+}
+async function shareSong(){
+  if (!state.song) return;
+  const ok = await copyText(shareLink(state.song.id));
+  const b = $('btnShare');
+  const old = b.textContent;
+  b.textContent = ok ? '✓ ¡Enlace copiado!' : '✗ No se pudo copiar';
+  setTimeout(() => { b.textContent = old; }, 2500);
+}
+async function shareSongId(id){
+  const ok = await copyText(shareLink(id));
+  if (ok) alert('🔗 ¡Enlace copiado! Compartilo para que otros hagan sus propios ecos en esta canción.');
+  else alert('No se pudo copiar el enlace.');
+}
+
 /* ============================================================ init */
-showLib();
+(function init(){
+  const sp = new URLSearchParams(location.search);
+  const sidParam = sp.get('song');
+  if (sidParam){
+    // enlace directo a una canción: ir directo al editor, sin biblioteca
+    openSong(sidParam);
+  } else {
+    showLib();
+  }
+})();
 </script>
 </body>
 </html>
+/html>
