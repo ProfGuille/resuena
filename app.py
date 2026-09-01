@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v29"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v30"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -218,8 +218,11 @@ def _prebuild_renders():
     lista (normal + "todas las apariciones") y deja el audio en disco, para
     que el play sea instantáneo sin importar la instancia ni el reinicio.
 
-    Cada render usa la misma lógica de producción (caché + manifiesto), así
-    que si ya existía (en disco o nube) no recalcula. Nunca lanza."""
+    Cada render usa la misma lógica de producción (caché + manifiesto local),
+    así que si ya existía en disco no recalcula. Durante el prebuild NO se
+    sube nada a la nube (evita saturar GitHub y la instancia). Nunca lanza."""
+    global _PREBUILDING
+    _PREBUILDING = True
     try:
         for s in store.all_songs().values():
             sid = s["id"]
@@ -245,6 +248,8 @@ def _prebuild_renders():
             print(f"pre-render listo: {sid} ({len(by_line)} líneas)", flush=True)
     except Exception as e:
         print("pre-render falló: " + str(e)[:200], flush=True)
+    finally:
+        _PREBUILDING = False
 
 
 def app_render_prebuild(sid, rng, all_occ):
@@ -1342,6 +1347,8 @@ def _all_occurrences(song, flat, a, b):
 _render_cache = {}
 _RENDER_CACHE_MAX = 80
 _song_fp_cache = {}
+_render_upload_sem = threading.Semaphore(2)   # (v30) máx 2 subidas a la nube a la vez
+_PREBUILDING = False                          # True durante el prebuild del arranque
 
 
 def _song_fingerprint(sid):
@@ -1397,13 +1404,11 @@ def render(sid: str, payload: dict):
             return json.loads(mpath.read_text(encoding="utf-8"))
         except Exception:
             pass
-    if media.persistent():
-        try:
-            media.get_file(f"render/{sid}/{key}.json", str(mpath))
-            if mpath.exists() and mpath.stat().st_size > 0:
-                return json.loads(mpath.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    # (v30) NO se consulta el manifiesto en la nube: esa llamada a GitHub
+    # tardaba hasta ~10 s por render y, peor, podía devolver una URL cuyo mp3
+    # no estaba subido todavia (el POST respondía y el GET daba 404 -> "no
+    # genera el audio"). El render SIEMPRE se recalcula en disco local (con la
+    # envolvente cacheada es rapido) y el prebuild del arranque regenera todo.
 
     flat = _flat(song)
     total = len(flat)
@@ -1785,10 +1790,12 @@ def render(sid: str, payload: dict):
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
         au.render_phrases(src, [(s, e) for s, e, _, _ in segments], str(out))
-        # subir a la nube en segundo plano: el GET sirve desde disco y no
-        # bloquea el POST (GitHub puede tardar segundos con archivos grandes)
-        threading.Thread(target=_upload_render_safe,
-                         args=(sid, fname, str(out)), daemon=True).start()
+        # subir a la nube en segundo plano (solo para pedidos reales; durante
+        # el prebuild NO se sube: evita 190 llamadas concurrentes a GitHub que
+        # saturaban la instancia free). El GET sirve desde disco.
+        if not _PREBUILDING:
+            threading.Thread(target=_upload_render_safe,
+                             args=(sid, fname, str(out)), daemon=True).start()
     resp = {
         "url": f"/api/songs/{sid}/render/{fname}",
         "segments": len(segments),
@@ -1811,6 +1818,8 @@ def render(sid: str, payload: dict):
 
 def _upload_render_safe(sid, fname, local_path):
     """Sube el render (mp3 + manifiesto) a la nube y poda los viejos."""
+    if not _render_upload_sem.acquire(timeout=0):
+        return
     try:
         if media.persistent():
             media.put_file(f"render/{sid}/{fname}", local_path)
@@ -1821,6 +1830,8 @@ def _upload_render_safe(sid, fname, local_path):
             _prune_renders(sid)
     except Exception:
         pass
+    finally:
+        _render_upload_sem.release()
 
 
 @app.post("/api/songs/{sid}/occurrences")

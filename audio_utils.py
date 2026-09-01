@@ -146,15 +146,48 @@ def render_phrases(src_mp3, segments, out_mp3, gap=0.2):
     """Corta los segmentos (start, end) del mp3 original y los concatena
     separados por un pequeño silencio. Devuelve la ruta del mp3 resultante.
 
-    (v29) usa un directorio temporal ÚNICO por llamada: el pre-render del
-    arranque y los pedidos de los usuarios corren en paralelo y los nombres
-    fijos (.seg0.wav, .sil.wav, .list.txt) se pisaban entre sí."""
+    (v30) TODOS los cortes se hacen en UN SOLO comando ffmpeg con
+    filter_complex (atrim + concat): un render con 15 segmentos pasa de
+    ~20 s a ~3 s. La envolvente del audio ya está cacheada en app.py, así que
+    el primer play es casi instantáneo."""
+    if len(segments) == 1:
+        s, e = segments[0]
+        r = ffmpeg_util.run_ffmpeg(["-y", "-ss", f"{s:.3f}", "-to", f"{e:.3f}",
+                 "-i", src_mp3, "-ac", "2", "-ar", "44100",
+                 "-c:a", "libmp3lame", "-b:a", "192k", out_mp3])
+        if r.returncode != 0:
+            raise RuntimeError("ffmpeg: no se pudo cortar el segmento: " + r.stderr[-300:])
+        return out_mp3
+
+    # varios segmentos: un solo ffmpeg con atrim + concat (silencios entre medias)
+    filters = []
+    labels = []
+    for k, (s, e) in enumerate(segments):
+        filters.append(
+            f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{k}]")
+        labels.append(f"[a{k}]")
+        if k < len(segments) - 1:
+            filters.append(
+                f"anullsrc=r=44100:cl=stereo,atrim=0:{gap:.3f},asetpts=PTS-STARTPTS[s{k}]")
+            labels.append(f"[s{k}]")
+    filters.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[out]")
+    fc = ";".join(filters)
+    r = ffmpeg_util.run_ffmpeg(["-y", "-i", src_mp3, "-filter_complex", fc,
+             "-map", "[out]", "-ac", "2", "-ar", "44100",
+             "-c:a", "libmp3lame", "-b:a", "192k", out_mp3])
+    if r.returncode != 0:
+        # si el filter_complex falla (ffmpeg viejo), volver al método por partes
+        _render_phrases_fallback(src_mp3, segments, out_mp3, gap)
+    return out_mp3
+
+
+def _render_phrases_fallback(src_mp3, segments, out_mp3, gap=0.2):
+    """Versión por partes (un ffmpeg por segmento + concat)."""
     import tempfile
     import uuid
     workdir = os.path.join(os.path.dirname(os.path.abspath(out_mp3)) or ".",
                            ".tmp_" + uuid.uuid4().hex[:8])
     os.makedirs(workdir, exist_ok=True)
-
     try:
         seg_files = []
         for k, (s, e) in enumerate(segments):
@@ -165,21 +198,17 @@ def render_phrases(src_mp3, segments, out_mp3, gap=0.2):
             if r.returncode != 0:
                 raise RuntimeError("ffmpeg: no se pudo cortar el segmento: " + r.stderr[-300:])
             seg_files.append(seg)
-
         sil = os.path.join(workdir, "sil.wav")
         ffmpeg_util.run_ffmpeg(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
              "-t", f"{gap:.3f}", "-c:a", "pcm_s16le", sil])
-
         items = []
         for k in range(len(seg_files)):
             items.append(seg_files[k])
             if k < len(seg_files) - 1:
                 items.append(sil)
-
         with open(os.path.join(workdir, "list.txt"), "w", encoding="utf-8") as f:
             for p in items:
                 f.write(f"file '{p}'\n")
-
         r = ffmpeg_util.run_ffmpeg(["-y", "-f", "concat", "-safe", "0",
                  "-i", os.path.join(workdir, "list.txt"),
                  "-c:a", "libmp3lame", "-b:a", "192k", out_mp3])
@@ -190,4 +219,3 @@ def render_phrases(src_mp3, segments, out_mp3, gap=0.2):
             shutil.rmtree(workdir, ignore_errors=True)
         except Exception:
             pass
-    return out_mp3
