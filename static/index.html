@@ -605,7 +605,26 @@ function pollSong(id){
 async function loadSel(id){
   const j = await api(`/api/songs/${id}/selection?user_id=${encodeURIComponent(state.uid)}`);
   state.sel = (j.ranges || []).map(r => [r[0], r[1]]);
-  updateOccInfo();
+  updateOccInfo(); prewarmRender();
+}
+
+/* ---------- pre-generación (v29) ----------
+ * Al cambiar la selección (o el checkbox), se pide el render en segundo plano
+ * con los mismos parámetros que "Generar". Así, cuando el usuario toca el
+ * play/Generar, el audio ya está generado (o en camino) y suena al instante.
+ * Fire-and-forget: si falla no molesta (el play lo reintenta igual). */
+let _prewarmTimer = null;
+function prewarmRender(){
+  if (!state.song || !state.sel || !state.sel.length) return;
+  clearTimeout(_prewarmTimer);
+  _prewarmTimer = setTimeout(() => {
+    const s = state.song;
+    fetch(`/api/songs/${s.id}/render`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_id: state.uid, ranges: state.sel,
+                             all_occurrences: $('allOcc').checked })
+    }).catch(()=>{});
+  }, 900);
 }
 
 /* ---------- conteo de apariciones (al tildar "incluir todas") ---------- */
@@ -634,7 +653,7 @@ async function updateOccInfo(){
     el.style.display = '';
   }catch(e){ el.style.display='none'; }
 }
-$('allOcc') && $('allOcc').addEventListener('change', updateOccInfo);
+$('allOcc') && $('allOcc').addEventListener('change', () => { updateOccInfo(); prewarmRender(); });
 
 /* ---------- letra ---------- */
 function flatWords(){
@@ -742,12 +761,12 @@ function toggleWord(i){
   }
   state.sel.sort((p,q)=>p[0]-q[0]);
   state.anchor = i;
-  paint(); scheduleSave(); updateOccInfo();
+  paint(); scheduleSave(); updateOccInfo(); prewarmRender();
 }
 function replaceRange(a,b){
   state.sel = [[a,b]];
   state.anchor = b;
-  paint(); scheduleSave(); updateOccInfo();
+  paint(); scheduleSave(); updateOccInfo(); prewarmRender();
 }
 /* Vacía toda la selección de una: limpia el pintado, para la lluvia y
  * guarda el estado vacío en el servidor (reinicia la selección). */
@@ -756,7 +775,7 @@ function clearSel(){
   state.sel = [];
   state.anchor = null;
   stopRain();
-  paint(); updateStats(); scheduleSave(); updateOccInfo();
+  paint(); updateStats(); scheduleSave(); updateOccInfo(); prewarmRender();
 }
 function extendTo(i){
   if (state.anchor === null) return toggleWord(i);
@@ -1072,6 +1091,40 @@ function onSeek(v){
   else if (fullAudio.duration) fullAudio.currentTime = pct*fullAudio.duration;
 }
 
+/* ---------- carga de audio con reintento ----------
+ * (v29) Si el GET del mp3 falla (instancia durmiendo/reiniciada, subida a la
+ * nube todavía en curso), se reintenta varias veces ANTES de mostrar error.
+ * Mientras tanto el botón muestra "preparando…" para que no parezca roto. */
+let _selAudioTries = 0;
+function loadSelAudio(url, onReady){
+  _selAudioTries = 0;
+  const tryLoad = () => {
+    selAudio.onerror = null;
+    selAudio.src = url + '?v=' + Date.now();
+    selAudio.load();
+    const ok = () => {
+      selAudio.onerror = null;
+      _selAudioTries = 0;
+      if (onReady) onReady();
+    };
+    selAudio.oncanplaythrough = ok;
+    selAudio.onerror = () => {
+      if (_selAudioTries < 4){
+        _selAudioTries++;
+        $('btnSelPlay').textContent = '⏳ preparando audio…';
+        setTimeout(tryLoad, 900);
+      } else {
+        selAudio.onerror = null;
+        $('btnSelPlay').textContent = '▶ Escuchar';
+        const w = $('renderWarn');
+        w.textContent = '⚠ El audio tardó demasiado (el servidor estaba arrancando). Tocá de nuevo el play o "Generar audio con mis frases".';
+        w.style.display = '';
+      }
+    };
+  };
+  tryLoad();
+}
+
 /* ---------- preview de línea ---------- */
 async function previewLine(li){
   const s = state.song;
@@ -1083,14 +1136,11 @@ async function previewLine(li){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ user_id: state.uid, ranges: [[a,b]], all_occurrences: false })
     });
-    // URL única por contenido: fuerza al navegador a pedir el audio nuevo
-    selAudio.src = j.url + '?v=' + Date.now();
     state.selUrl = j.url;
     state.timeline = j.timeline || null;
     state.rainOn = false;   // línea suelta: sin lluvia
     setMode('sel');
-    selAudio.load();
-    selAudio.play().catch(()=>{});
+    loadSelAudio(j.url, () => { selAudio.play().catch(()=>{}); });
   } catch(e){ $('renderErr').textContent = e.message; $('renderErr').style.display = ''; }
 }
 
@@ -1108,8 +1158,6 @@ async function generateRender(){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ user_id: state.uid, ranges: state.sel, all_occurrences: $('allOcc').checked })
     });
-    const u = j.url + '?v=' + Date.now();
-    selAudio.src = u;
     state.selUrl = j.url;
     state.timeline = j.timeline || null;
     state.rainOn = true;    // audio generado con las frases: la lluvia puede salir
@@ -1144,6 +1192,7 @@ async function generateRender(){
     $('btnSelPlay').textContent = '▶ Escuchar';
     setMode('sel');
     $('btnPlay').textContent='▶';
+    loadSelAudio(j.url);
   } catch(e){
     $('renderErr').textContent = e.message;
     $('renderErr').style.display = '';
