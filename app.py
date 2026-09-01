@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v19"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v23"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -48,7 +48,6 @@ ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus",
 
 _model = None
 _model_lock = threading.Lock()
-
 
 def _container_mem_mb():
     """RAM REAL disponible para ESTE contenedor.
@@ -70,7 +69,6 @@ def _container_mem_mb():
             continue
     return None
 
-
 def _pick_model():
     """Elige el modelo de Whisper que quepa en la RAM REAL del contenedor.
 
@@ -90,7 +88,6 @@ def _pick_model():
         return "tiny"
     return requested
 
-
 def get_model():
     global _model
     with _model_lock:
@@ -108,17 +105,14 @@ def get_model():
                 _model = WhisperModel(chosen, device="cpu", compute_type="int8")
         return _model
 
-
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
-
 
 # ---------------------------------------------------------------- cola de análisis
 # El CPU del plan free es limitado: se procesa UNA canción por vez.
 _proc_lock = threading.Lock()
 _proc_queue = queue.Queue()
 _proc_worker_started = False
-
 
 def process_song(sid):
     """Encola el análisis de una canción (se procesa de a una por vez)."""
@@ -128,7 +122,6 @@ def process_song(sid):
             threading.Thread(target=_proc_worker, daemon=True).start()
             _proc_worker_started = True
     _proc_queue.put(sid)
-
 
 def _proc_worker():
     while True:
@@ -142,7 +135,6 @@ def _proc_worker():
         finally:
             _proc_queue.task_done()
 
-
 def _set_phase(sid, phase):
     try:
         song = store.get_song(sid)
@@ -152,7 +144,6 @@ def _set_phase(sid, phase):
     except Exception:
         pass
 
-
 def _upload_src_safe(sid, src_path, ext):
     """Guarda el archivo original en la nube (para poder retomar si se reinicia)."""
     if not media.persistent():
@@ -161,7 +152,6 @@ def _upload_src_safe(sid, src_path, ext):
         media.put_file(f"src/{sid}{ext}", src_path)
     except Exception:
         pass
-
 
 MAX_RETRIES = 3
 
@@ -200,7 +190,6 @@ def _recover_stuck_songs():
     except Exception:
         pass
 
-
 def _recheck_align():
     """Re-encola canciones ya listas cuya alineación se generó con el pipeline
     viejo (transcript menos preciso). Se re-analizan solas desde el mp3 ya
@@ -223,7 +212,6 @@ def _recheck_align():
     except Exception:
         pass
 
-
 @asynccontextmanager
 async def lifespan(app):
     store.init()          # memoria desde disco + GitHub (rápido, sin red en lecturas)
@@ -243,9 +231,7 @@ async def lifespan(app):
     threading.Thread(target=_warm, daemon=True).start()
     yield
 
-
 app = FastAPI(title="Resuena", lifespan=lifespan)
-
 
 @app.middleware("http")
 async def no_store_cache(request, call_next):
@@ -255,12 +241,10 @@ async def no_store_cache(request, call_next):
     response.headers["Cache-Control"] = "no-store"
     return response
 
-
 @app.exception_handler(Exception)
 async def unhandled_error_handler(request, exc):
     """Nunca devolver un 500 con traceback crudo: JSON limpio y genérico."""
     return JSONResponse(status_code=500, content={"detail": "Error interno del servidor. Reintentá."})
-
 
 def _ensure_audio(sid):
     """Asegura que el mp3 de la canción exista en disco (lo baja del backend
@@ -270,22 +254,18 @@ def _ensure_audio(sid):
         media.get_file(f"song/{sid}.mp3", str(f))
     return f
 
-
 def _ensure_render(sid, fname):
     f = RENDER_DIR / f"{sid}_{fname}"
     if (not f.exists() or f.stat().st_size == 0) and media.persistent():
         media.get_file(f"render/{sid}/{fname}", str(f))
     return f
 
-
 # ---------------------------------------------------------------- frontend
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
 
-
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
 
 # ---------------------------------------------------------------- canciones
 @app.get("/api/health")
@@ -313,14 +293,12 @@ def list_songs():
     out.sort(key=lambda s: s["created_at"], reverse=True)
     return {"songs": out}
 
-
 @app.get("/api/songs/{sid}")
 def get_song(sid: str):
     song = store.get_song(sid)
     if not song:
         raise HTTPException(404, "Canción no encontrada")
     return song
-
 
 @app.post("/api/songs")
 async def create_song(
@@ -383,7 +361,6 @@ async def create_song(
     process_song(sid)
     return {"id": sid}
 
-
 @app.delete("/api/songs/{sid}")
 def delete_song(sid: str):
     if not store.get_song(sid):
@@ -400,7 +377,6 @@ def delete_song(sid: str):
         media.delete_prefix(f"render/{sid}/")
     return {"ok": True}
 
-
 @app.get("/api/songs/{sid}/audio")
 def song_audio(sid: str):
     if not store.get_song(sid):
@@ -414,7 +390,6 @@ def song_audio(sid: str):
         )
     return FileResponse(str(f), media_type="audio/mpeg")
 
-
 # ---------------------------------------------------------------- selección
 @app.get("/api/songs/{sid}/selection")
 def get_selection(sid: str, user_id: str = "anon"):
@@ -422,7 +397,6 @@ def get_selection(sid: str, user_id: str = "anon"):
         raise HTTPException(404, "Canción no encontrada")
     sel = store.get_selection(sid, user_id)
     return {"ranges": sel.get("ranges", []) if sel else []}
-
 
 @app.post("/api/songs/{sid}/selection")
 def set_selection(sid: str, payload: dict):
@@ -439,7 +413,6 @@ def set_selection(sid: str, payload: dict):
                 pass
     store.save_selection(sid, user_id, clean)
     return {"ok": True}
-
 
 # ---------------------------------------------------------------- render
 def _prune_renders(sid, max_files=60):
@@ -463,14 +436,12 @@ def _prune_renders(sid, max_files=60):
             except Exception:
                 pass
 
-
 def _flat(song):
     flat = []
     for li, line in enumerate(song["lines"] or []):
         for wi, w in enumerate(line["words"]):
             flat.append((li, wi, w))
     return flat
-
 
 def _speech_tail(src, s0, e0, dur, transcript, next_start=None):
     """Extiende el final del corte hasta donde TERMINA la voz de verdad.
@@ -566,7 +537,6 @@ def _speech_tail(src, s0, e0, dur, transcript, next_start=None):
     except Exception:
         return e0
 
-
 def _is_real_anchor(w):
     """¿La palabra tiene un match REAL en el transcript?
 
@@ -577,9 +547,7 @@ def _is_real_anchor(w):
         and w.get("sim", 1.0) > 0.55 \
         and w.get("s") is not None and w.get("e") is not None
 
-
 _BREATH_RE = re.compile(r"inhal|exhal|respira", re.I)
-
 
 def _is_breath(w):
     """¿La palabra del transcript es una respiración (no voz cantada)?
@@ -591,6 +559,535 @@ def _is_breath(w):
     t = (w.get("word") or "").strip()
     return (not t) or bool(_BREATH_RE.search(t)) or t in ("♪", "♫", "…", "...")
 
+# ---------------------------------------------------------------------------
+# Fronteras de voz por ENERGÍA real (v20)
+#
+# Causa raíz de "la frase siguiente empieza con el final de la anterior":
+# los timestamps de palabra del transcript (whisper) cortan la COLA final de
+# cada palabra (la vocal/transición que sigue sonando). Como las frases son
+# contiguas, la frase N+1 arranca exactamente en ese fin recortado y arrastra
+# la cola de la N (y la N sola suena recortada al final). No se tocan los
+# timestamps: las fronteras se definen con la energía real del audio.
+#   - inicio de frase  = el valle de energía justo antes de la primera subida
+#                        sostenida de voz (arranque de la primera palabra);
+#   - final de frase   = el último valle antes del arranque de la frase
+#                        siguiente, o el final de la nota sostenida si la
+#                        frase siguiente está lejos.
+# ---------------------------------------------------------------------------
+
+_ENV_CACHE = {}
+_ENV_LOCK = threading.Lock()
+
+def _rms_env(src):
+    """Envolvente RMS de 10 ms (16 kHz mono) de TODO el audio, cacheada por
+    canción. Se usa para medir dónde empieza/termina la voz de verdad."""
+    key = os.path.abspath(str(src))
+    with _ENV_LOCK:
+        if key in _ENV_CACHE:
+            return _ENV_CACHE[key]
+    ff = ffmpeg_util.ensure_ffmpeg()
+    r = subprocess.run(
+        [ff + "/ffmpeg", "-v", "error", "-i", str(src),
+         "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+        capture_output=True,
+    )
+    x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    win, hop = 480, 160          # ventana 30 ms, paso 10 ms
+    n = (len(x) - win) // hop + 1
+    rms = np.empty(n, dtype=np.float64)
+    for k in range(n):
+        seg = x[k * hop:k * hop + win]
+        rms[k] = float(np.sqrt(np.mean(seg * seg)))
+    with _ENV_LOCK:
+        if len(_ENV_CACHE) >= 6:
+            _ENV_CACHE.pop(next(iter(_ENV_CACHE)))
+        _ENV_CACHE[key] = rms
+    return rms
+
+def _idx(t):
+    return int(round(float(t) / 0.01))
+
+def _first_rise_event(env, t0, t1):
+    """Primer valle local en [t0,t1] seguido de una subida >= 20 % en <= 4
+    ventanas (40 ms). Devuelve el tiempo del valle o None."""
+    i0 = max(1, _idx(t0))
+    i1 = min(len(env) - 2, _idx(t1))
+    if i1 - i0 < 5:
+        return None
+    for k in range(i0, i1 + 1):
+        v = env[k]
+        if v <= env[k - 1] and v <= env[k + 1]:
+            target = 1.20 * v
+            for kk in range(k + 1, min(k + 5, i1 + 1)):
+                if env[kk] >= target:
+                    return k * 0.01
+    return None
+
+def _last_rise_event(env, t0, t1, factor=1.20):
+    """Último valle local en [t0,t1] seguido de una subida >= factor en <= 4
+    ventanas. Devuelve el tiempo del valle o None."""
+    i0 = max(1, _idx(t0))
+    i1 = min(len(env) - 2, _idx(t1))
+    last = None
+    if i1 - i0 < 5:
+        return None
+    for k in range(i0, i1 + 1):
+        v = env[k]
+        if v <= env[k - 1] and v <= env[k + 1]:
+            target = factor * v
+            for kk in range(k + 1, min(k + 5, i1 + 1)):
+                if env[kk] >= target:
+                    last = k * 0.01
+                    break
+    return last
+
+def _seam_before(env, w0, w1, first_s=None, floor=0.02):
+    """Frontera (valle de costura) entre dos frases dentro de [w0, w1]: el
+    último mínimo local antes del PRIMER ataque real de voz.
+
+    Un ataque real de frase es un pico local que supera ~1.5 x el PISO LOCAL
+    (el mínimo de los ~100 ms previos). Ese criterio distingue el arranque de
+    una sílaba nueva de las fluctuaciones de una cola en decaimiento: la cola
+    mantiene su propio nivel (el pico ~ la base, ratio ~1) mientras que un
+    ataque sube desde un valle (ratio > 1.5). Funciona también cuando el
+    ataque sube DESDE una cola sonora (sin silencio entre frases), que es el
+    caso que el promedio de ventana rechazaba.
+
+    Si el ataque está ANTES del timestamp de la primera palabra del transcript
+    (whisper lo puso tarde sobre la cola), se exige además energía sostenida
+    después (media de los ~300 ms posteriores >= 0.45 x el pico): la frase
+    continúa, no es un release/consonante de la palabra anterior.
+
+    Devuelve el ÚLTIMO mínimo local antes de ese ataque (el valle de costura),
+    o None si no hay ataque claro (el transcript queda como está).
+    """
+    i0 = max(1, _idx(w0))
+    i1 = min(len(env) - 3, _idx(w1))
+    if i1 - i0 < 12:
+        return None
+    lo_min_lim = max(w0, first_s - 0.05) if first_s is not None else w0
+    for k in range(i0 + 2, i1 + 1):
+        v = float(env[k])
+        if v < floor:
+            continue
+        if not (v >= env[k - 1] and v >= env[k + 1]):
+            continue
+        # pico local: se usa SU valor (no el de la ventana hacia adelante:
+        # eso hacía que un futuro ataque fuerte marcara un micro-pico de la
+        # cola y la costura saliera temprana, p. ej. 38.90 en vez de 38.97).
+        kf0 = max(1, k - 14)
+        kf1 = max(kf0, k - 5)
+        base = float(env[kf0:kf1 + 1].min())
+        if base <= 0 or v < 1.5 * base:
+            continue
+        # el ataque real arranca desde un VALLE previo (dip): si no hay valle
+        # en los ~170 ms anteriores, es una fluctuación de una nota o de la
+        # cola de la frase anterior (p. ej. el pico de "aurora" dentro de la
+        # frase previa), no un inicio de frase.
+        b = None
+        for j in range(k - 1, max(i0 - 1, k - 17), -1):
+            if env[j] <= env[j - 1] and env[j] <= env[j + 1]:
+                b = j
+                break
+        if b is not None and float(env[b]) <= 0.75 * v:
+            pass  # ataque con valle previo claro
+        elif base <= 0.04 and v >= 2.0 * base:
+            # sin valle en la ventana, pero el ataque sube desde un piso
+            # REALMENTE bajo (la frase arranca directo desde silencio o cola
+            # mínima): aceptar y usar el inicio de la ventana como costura
+            # (p. ej. "Se" de "Se fue..." con su valle justo antes de la
+            # ventana). Una fluctuación de cola NO cumple: su base es el
+            # nivel de la cola (no baja).
+            b = i0
+        else:
+            continue
+        if k * 0.01 < lo_min_lim:
+            after = float(env[k + 1:min(len(env), k + 31)].mean())
+            if after < 0.45 * v:
+                continue
+        return b * 0.01
+    return None
+
+def _onset_after_tail(env, lo, first_s):
+    """Frontera de arranque con cola PEGADA o transcript SOLAPADO (gap ~ 0 o
+    negativo): la cola de la palabra anterior quedó absorbida por la primera
+    palabra de la frase siguiente, así que el transcript no sirve. Ver
+    _seam_before: la frontera es el último valle antes del primer ataque."""
+    lo = max(lo, first_s)
+    start = max(0.0, lo - 0.08)
+    w1 = min(lo + 0.70, max(first_s, lo) + 0.65)
+    return _seam_before(env, start, w1, first_s=first_s)
+
+def _strong_onset(env, t0, t1, floor):
+    """Primer ataque FUERTE de voz en [t0, t1]: un pico local que (a) supera
+    el piso absoluto `floor` y (b) sube >= 1.6x el mínimo de los ~150 ms
+    anteriores (el piso previo al ataque). Devuelve el último valle antes de
+    ese pico, o None. Sirve para recuperar arranques donde whisper quedó
+    temprano sobre silencio/instrumental (aire muerto al inicio)."""
+    i0 = max(1, _idx(t0))
+    i1 = min(len(env) - 2, _idx(t1))
+    if i1 - i0 < 10:
+        return None
+    pk = None
+    for k in range(i0 + 1, i1 + 1):
+        v = env[k]
+        if v >= floor and v >= env[k - 1] and v >= env[k + 1]:
+            base = float(env[max(i0, k - 15):k].min())
+            if base > 0 and v >= 1.6 * base:
+                pk = k
+                break
+    if pk is None:
+        return None
+    valley = None
+    for k in range(i0, pk):
+        if env[k] <= env[k - 1] and env[k] <= env[k + 1]:
+            valley = k
+    if valley is None:
+        return None
+    return valley * 0.01
+
+def _decays_quickly(env, t, dur=0.25):
+    """¿La energía decae a menos de la mitad del pico en `dur` segundos?
+    Se usa para distinguir la SÍLABA FINAL de una frase (decae: pertenece a
+    la frase) del ATAQUE de la frase siguiente (se sostiene: la costura es el
+    valle anterior)."""
+    i0 = max(1, _idx(t))
+    if i0 >= len(env) - 1:
+        return True
+    peak = float(env[i0])
+    if peak < 0.02:
+        return True
+    i1 = min(len(env) - 1, i0 + int(dur / 0.01))
+    for k in range(i0 + 1, i1 + 1):
+        if env[k] < 0.5 * peak:
+            return True
+    return False
+
+def _first_attack_in(env, t0, t1, ratio=1.5, floor=0.02):
+    """Primer ataque fuerte (pico local >= ratio x el mínimo de los ~150 ms
+    anteriores, >= floor) dentro de [t0, t1]. Devuelve el tiempo del pico."""
+    i0 = max(1, _idx(t0))
+    i1 = min(len(env) - 2, _idx(t1))
+    if i1 - i0 < 10:
+        return None
+    for k in range(i0 + 1, i1 + 1):
+        v = env[k]
+        if v >= floor and v >= env[k - 1] and v >= env[k + 1]:
+            base = float(env[max(i0, k - 15):k].min())
+            if base > 0 and v >= ratio * base:
+                return k * 0.01
+    return None
+
+def _note_tail_end(env, e0, cap):
+    """Fin de una nota final SOSTENIDA que el corte quedó cortando a mitad
+    (p. ej. un \"paz\" largo al final de la frase). Desde el punto de corte
+    hacia adelante: si la voz sigue >= 50 % del pico local hasta el tope, la
+    nota llega al tope (fin = cap); si no, el fin es justo después del último
+    tramo que supera ese 50 %. Devuelve un tiempo o None."""
+    i_e = max(1, _idx(e0))
+    i_cap = min(len(env) - 2, _idx(cap))
+    if i_cap - i_e < 10:
+        return None
+    w = env[max(0, i_e - 30):min(len(env), i_e + 10) + 1]
+    pk = float(w.max()) if w.size else 0.0
+    if pk < 0.02:
+        return None
+    half = 0.5 * pk
+    # (v23) no puentear un corte real: si entre la voz y el tope hay un
+    # mínimo profundo (< 0.30 x el pico local), la nota terminó antes y lo
+    # que sigue es OTRA sección musical (p. ej. el relleno instrumental tras
+    # "incondicional" en NESOLO L16: el seam lo arrastraba 4 s). La nota
+    # sostenida real (un "paz" largo) no tiene ese corte y queda intacta.
+    deep = None
+    for k in range(i_e, i_cap + 1):
+        if env[k] < 0.30 * pk:
+            deep = k
+            break
+    if deep is not None:
+        last_hi = None
+        for k in range(i_e, min(deep, i_cap) + 1):
+            if env[k] >= half:
+                last_hi = k
+        if last_hi is None:
+            return None
+        return min((last_hi + 1) * 0.01, cap)
+    last_hi = None
+    for k in range(i_e, i_cap + 1):
+        if env[k] >= half:
+            last_hi = k
+    if last_hi is None:
+        return None
+    if env[i_cap] >= half:
+        return cap
+    return min((last_hi + 1) * 0.01, cap)
+
+def _onset_boundary(env, lo, first_s):
+    """Frontera de arranque con cola PEGADA (gap transcript ~ 0): la cola de
+    la palabra anterior quedó absorbida por la primera palabra de la frase
+    siguiente, así que el transcript no sirve. Se busca el PRIMER pico de voz
+    que supera claramente (>= 15 %) el nivel ~70 ms antes del pico (la cola):
+    es el arranque de la frase nueva. La frontera es el último valle antes de
+    ese pico."""
+    w1 = min(lo + 0.55, first_s + 0.45)
+    i0 = max(1, _idx(lo))
+    i1 = min(len(env) - 2, _idx(w1))
+    if i1 - i0 < 10:
+        return None
+    pk = None
+    for k in range(i0 + 1, i1 + 1):
+        v = env[k]
+        if v >= env[k - 1] and v >= env[k + 1] and v >= 0.02:
+            prev_level = env[max(i0, k - 7)]
+            if v >= 1.15 * prev_level:
+                pk = k
+                break
+    if pk is None:
+        return None
+    valley = None
+    for k in range(i0, pk):
+        if env[k] <= env[k - 1] and env[k] <= env[k + 1]:
+            valley = k
+    if valley is None:
+        return None
+    return valley * 0.01
+
+def _held_note_end(env, lo_end, cap):
+    """Fin de una nota sostenida con caída RÁPIDA tras el último pico (se usa
+    cuando la frase siguiente está lejos y no hay frontera contigua). Devuelve
+    el fin estimado o None si la caída es gradual (no cortar un diminuendo)."""
+    i0 = max(1, _idx(max(0.0, lo_end - 0.3)))
+    i1 = min(len(env) - 2, _idx(cap))
+    if i1 - i0 < 20:
+        return None
+    w = env[i0:i1 + 1]
+    peak = float(w.max())
+    if peak < 0.02:
+        return None
+    pk_pos = i0 + int(np.argmax(w))
+    last_peak = None
+    for k in range(pk_pos, i1 + 1):
+        if env[k] >= env[k - 1] and env[k] >= env[k + 1] and env[k] >= 0.8 * peak:
+            last_peak = k
+    if last_peak is None:
+        last_peak = pk_pos
+    drop_thr = 0.45 * peak
+    j = None
+    for k in range(last_peak + 1, i1 + 1):
+        if env[k] < drop_thr:
+            j = k
+            break
+    if j is None:
+        return None
+    if (j - last_peak) * 0.01 > 0.20:
+        return None
+    nxt = env[j + 1:j + 9]
+    if nxt.size < 5:
+        return None
+    if int((nxt < 0.5 * peak).sum()) >= 5:
+        return j * 0.01 + 0.05
+    return None
+
+def _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src):
+    """Ajusta los límites del segmento con la energía real de la voz (v21):
+      - INICIO: el segmento empieza en el último valle antes del primer ataque
+        fuerte de voz (recorta la cola de la frase anterior y el aire muerto
+        por whisper temprano). Puede ADELANTAR o RETRASAR el ancla del
+        transcript.
+      - FINAL: el segmento termina en el valle de la unión con la frase
+        siguiente (incluye la cola completa de la última palabra) o, si la
+        nota final es sostenida, se extiende hasta justo antes del arranque de
+        la frase siguiente.
+    Devuelve (s0, e0) ajustados."""
+    try:
+        if not run or run_i is None:
+            return s0, e0
+        env = _rms_env(src)
+        lines = song.get("lines") or []
+        li0 = flat[run_i][0]
+        li1 = flat[min(len(flat) - 1, run_i + len(run) - 1)][0]
+        first_s = float(run[0].get("s")) if run[0].get("s") is not None else None
+        lo_end = float(run[-1].get("e")) if run[-1].get("e") is not None else None
+
+        prev_end = None
+        if li0 > 0:
+            prev_words = (lines[li0 - 1].get("words") or [])
+            if prev_words and prev_words[-1].get("e") is not None:
+                prev_end = float(prev_words[-1]["e"])
+        next_first_s = None
+        if li1 + 1 < len(lines):
+            next_words = (lines[li1 + 1].get("words") or [])
+            if next_words and next_words[0].get("s") is not None:
+                next_first_s = float(next_words[0]["s"])
+
+        # ================= INICIO =================
+        # La frontera con la frase anterior es el valle justo antes del primer
+        # ataque de voz de ESTA frase (detectado por energía; whisper puede
+        # quedar temprano O tarde). Se permite mover el inicio hacia adelante
+        # (recortar cola de la frase anterior / aire muerto) o hacia atrás
+        # (recuperar la 1ª sílaba si whisper quedó tarde), acotado por el fin
+        # del transcript de la frase previa.
+        bnd_start = None
+        if first_s is not None and prev_end is not None:
+            gap = first_s - prev_end
+            if gap >= 0.10:
+                # aire entre frases según el transcript: el arranque real de la
+                # frase puede estar hasta 0.15-0.30 s después del timestamp de
+                # la primera palabra (whisper arranca temprano sobre colas).
+                w0_in = max(first_s - 0.25,
+                            (prev_end - 0.02) if prev_end is not None else
+                            first_s - 0.25)
+                bnd_start = _seam_before(env, w0_in, first_s + 0.55,
+                                         first_s=first_s)
+                if bnd_start is None:
+                    bnd_start = first_s - 0.02
+            else:
+                # frontera contaminada o transcript solapado (gap ~ 0 o
+                # negativo): la cola quedó pegada a la palabra siguiente.
+                bnd_start = _onset_after_tail(env, max(prev_end, first_s),
+                                              max(prev_end, first_s))
+                if bnd_start is None:
+                    bnd_start = first_s - 0.02
+            if bnd_start is not None:
+                # (v23) El ancla del transcript (whisper-small) es la fuente
+                # principal del arranque de la frase: el seam solo puede
+                # ADELANTAR el inicio sobre silencio/instrumental real (aire
+                # muerto por whisper temprano) o dejarlo en first_s. NUNCA se
+                # mueve el inicio más tarde que first_s: antes, el seam
+                # "cortaba" el arranque de la palabra (p. ej. dentro de
+                # "por"/"que"/"si") y la frase sonaba empezando con la cola
+                # de la anterior (o con una vocal colgada).
+                lo_ok = min(prev_end, first_s) - 0.25
+                if bnd_start > first_s + 0.05:
+                    # seam tardío: no confiar; quedarse con el ancla
+                    if first_s > s0 + 0.02 and first_s < e0 - 0.05:
+                        s0 = first_s
+                elif bnd_start < first_s - 0.03:
+                    # seam más temprano que el ancla: solo si el arranque del
+                    # transcript está sobre SILENCIO (recuperar cabeza real).
+                    # Si hay energía viva antes de first_s (cola de la frase
+                    # previa / ataque interno), NO tirar el inicio atrás: eso
+                    # metía la cola de la frase anterior en el clip.
+                    k0 = max(1, _idx(max(0.0, first_s - 0.15)))
+                    k1 = min(len(env) - 1, _idx(first_s + 0.05))
+                    dead = float(env[k0:k1 + 1].max()) < 0.06
+                    if dead and bnd_start >= lo_ok and bnd_start < e0 - 0.05:
+                        s0 = bnd_start
+                    elif first_s > s0 + 0.02 and first_s < e0 - 0.05:
+                        s0 = first_s
+                else:
+                    # seam ≈ first_s: ajuste fino
+                    if bnd_start >= lo_ok and bnd_start < e0 - 0.05:
+                        s0 = bnd_start
+        # aire muerto por whisper TEMPRANO con gap largo: si el inicio quedó
+        # en silencio/instrumental puro, buscar el primer ataque fuerte de voz
+        # más allá (hasta first_s + 1.00 s) y recortar el silencio. La búsqueda
+        # empieza en el inicio ya fijado (no antes: no volver a colas previas).
+        if first_s is not None and prev_end is not None:
+            k0 = max(1, _idx(max(0.0, s0)))
+            k1 = min(len(env) - 1, _idx(s0 + 0.35))
+            if k1 > k0 and float(env[k0:k1 + 1].max()) < 0.06:
+                w0 = max(first_s - 0.25, s0)
+                strong = _strong_onset(env, w0, first_s + 1.00, 0.045)
+                if strong is not None and strong < e0 - 0.05 and strong > s0 + 0.02:
+                    s0 = strong
+        # cabeza interpolada (timestamps falsos): la primera palabra puede
+        # haber quedado cortada (el transcript la arrancó tarde). Extender
+        # hacia atrás hasta el arranque real antes de la 1ª ancla real, pero
+        # NUNCA antes del inicio ya fijado por la frontera anterior ni del
+        # final de la frase previa.
+        if not _is_real_anchor(run[0]) and first_s is not None:
+            for w in run:
+                if _is_real_anchor(w):
+                    fr_s = float(w["s"])
+                    head_s = float(run[0]["s"])
+                    lo_h = max(0.0, min(head_s - 0.18, fr_s - 0.25))
+                    hi_h = min(fr_s, head_s + 0.10)
+                    if hi_h - lo_h >= 0.10:
+                        # detección FUERTE: el arranque real de la cabeza es un
+                        # valle de costura con ataque claro (rechaza los micro-
+                        # valles de la cola de la frase anterior).
+                        onset = _seam_before(env, lo_h, hi_h)
+                        if onset is None:
+                            onset = _strong_onset(env, lo_h, hi_h, 0.03)
+                        if onset is not None and onset < s0 - 0.02:
+                            cap_h = (prev_end + 0.02) if prev_end is not None else None
+                            if cap_h is None or onset >= cap_h:
+                                s0 = max(0.0, min(s0, onset))
+                    break
+
+        # ================= FINAL =================
+        if lo_end is not None:
+            if next_first_s is not None:
+                gap = next_first_s - lo_end
+                # La frontera con la frase siguiente es el valle justo antes
+                # del PRIMER ataque real de voz de esa frase (detectado por
+                # energía: _seam_before). whisper puede poner el arranque
+                # siguiente temprano (sobre la cola de esta frase) o tarde
+                # (sobre silencio/instrumental), así que la ventana cubre
+                # desde la cola de esta frase hasta 0.55 s después del
+                # timestamp del transcript. El valle resultante puede
+                # RETRASAR el final (incluir la cola completa de la última
+                # palabra: sin recortes) o ADELANTARLO (si el ancla invadía
+                # el arranque siguiente: sin cola en la frase siguiente).
+                bnd = _seam_before(env, max(0.0, lo_end - 0.08),
+                                   next_first_s + 0.55,
+                                   first_s=next_first_s)
+                if bnd is not None and lo_end - 0.25 <= bnd <= e0 + 0.60:
+                    e0 = bnd
+                    # (v23) tope DURO: el seam no puede terminar la frase
+                    # DENTRO del arranque de la frase siguiente. Antes el seam
+                    # (hasta e0+0.60) invadía la 1ª palabra de la próxima
+                    # (p. ej. L7 de Noche terminaba en 74.12 dentro del "por"
+                    # de L8, y L10 en 91.23 dentro del "que" de L11) y la frase
+                    # siguiente arrancaba tarde por el anti-solape.
+                    if next_first_s is not None:
+                        e0 = min(e0, max(next_first_s, lo_end))
+                elif gap < 0.10:
+                    # unión pegada y sin valle claro: no invadir la frase
+                    # siguiente
+                    cap = min(next_first_s - 0.02, lo_end + 2.0)
+                    if e0 > cap:
+                        e0 = max(cap, lo_end - 0.05)
+                    hne = _held_note_end(env, lo_end, max(cap, lo_end + 0.2))
+                    if hne is not None and hne > e0 - 0.05:
+                        e0 = min(float(dur), max(e0, hne))
+                else:
+                    # aire entre frases (respaldo si el seam no aplicó):
+                    # extender el final hasta el último valle antes del
+                    # arranque siguiente, SIN invadir su primera palabra
+                    bnd2 = _last_rise_event(env, lo_end, next_first_s + 0.02)
+                    if bnd2 is None:
+                        bnd2 = _last_rise_event(env, lo_end,
+                                                next_first_s + 0.40, factor=1.5)
+                    if bnd2 is not None:
+                        bnd2 = min(bnd2, next_first_s - 0.05)
+                    if bnd2 is not None and e0 - 0.05 < bnd2 <= e0 + 0.60:
+                        e0 = min(max(e0, bnd2), bnd2 + 0.35)
+                    else:
+                        cap = min(next_first_s - 0.05, lo_end + 2.0)
+                        hne = _held_note_end(env, lo_end, cap)
+                        if hne is not None and e0 - 0.05 < hne <= e0 + 2.0:
+                            e0 = min(float(dur), max(e0, hne))
+                        else:
+                            # nota final sostenida que el corte dejó a mitad:
+                            # extender hasta el final real de la nota
+                            cap2 = min(next_first_s - 0.05, lo_end + 4.0)
+                            nte = _note_tail_end(env, min(e0, lo_end), cap2)
+                            if nte is not None and nte > e0 - 0.05:
+                                e0 = min(float(dur), max(e0, nte))
+            else:
+                # última frase de la canción
+                cap = min(float(dur), lo_end + 2.0)
+                hne = _held_note_end(env, lo_end, cap)
+                if hne is not None and e0 - 0.05 < hne <= e0 + 2.0:
+                    e0 = min(float(dur), max(e0, hne))
+
+        e0 = min(float(dur), max(0.0, e0))
+        if e0 - s0 > 0.05:
+            s0 = min(max(0.0, s0), e0 - 0.05)
+        return s0, e0
+    except Exception:
+        return s0, e0
 
 @app.post("/api/songs/{sid}/render")
 def render(sid: str, payload: dict):
@@ -634,17 +1131,20 @@ def render(sid: str, payload: dict):
         omitted_words += sum(1 for w in words if not w.get("m"))
         # dividir la selección en tramos contiguos de palabras CON audio;
         # los huecos sin audio detectado se saltean (no invaden el audio final)
-        runs = []
+        runs = []          # (índice plano de la 1ª palabra, palabras del tramo)
         cur = []
-        for w in words:
+        cur_i = None
+        for j, w in enumerate(words):
             if w.get("m"):
+                if cur_i is None:
+                    cur_i = a + j
                 cur.append(w)
             else:
                 if cur:
-                    runs.append(cur)
-                    cur = []
+                    runs.append((cur_i, cur))
+                    cur, cur_i = [], None
         if cur:
-            runs.append(cur)
+            runs.append((cur_i, cur))
         # respaldo POSICIONAL (se calcula UNA vez por rango): la frase no tiene
         # audio en su posición (el modelo la transcribió mal ahí). Pero SABEMOS
         # dónde está en la canción: entre la última palabra REAL con audio que
@@ -726,12 +1226,13 @@ def render(sid: str, payload: dict):
             skipped += 1
             continue
 
-        for run in runs:
+        for run_i, run in runs:
             if all_occ:
                 tjs = [w.get("tj") for w in run if w.get("tj") is not None]
                 if not tjs:
                     s0 = max(0.0, run[0]["s"] - 0.15)
                     e0 = min(dur, run[-1]["e"] + 0.25)
+                    s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
                     if e0 - s0 > 0.05:
                         segments.append((s0, e0, ptext))
                     continue
@@ -739,6 +1240,7 @@ def render(sid: str, payload: dict):
                 for k0, k1, _ in align.find_occurrences(transcript, j0, j1):
                     s0 = max(0.0, transcript[k0]["start"] - 0.15)
                     e0 = min(dur, transcript[k1]["end"] + 0.25)
+                    s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
                     if e0 - s0 > 0.05:
                         segments.append((s0, e0, ptext))
             else:
@@ -842,6 +1344,21 @@ def render(sid: str, payload: dict):
                         # palabra ("...ladrone[s]" se oía recortado).
                         e0 = min(e0, max(next_anchor_s - 0.05,
                                          float(last_real["e"]) + 0.05))
+                    next_first_s = None
+                    li_last = flat[run_i + len(run) - 1][0]
+                    nxt_lines = song.get("lines") or []
+                    if li_last + 1 < len(nxt_lines):
+                        nw = (nxt_lines[li_last + 1].get("words") or [])
+                        if nw and nw[0].get("s") is not None:
+                            next_first_s = float(nw[0]["s"])
+                    if next_first_s is not None:
+                        # (v23) tope DURO: la extensión de cola suave (n_soft)
+                        # no puede cruzar al arranque de la frase siguiente.
+                        # Antes, una cola con palabras "fantasma" del transcript
+                        # extendía el final HASTA DENTRO de la frase siguiente
+                        # (p. ej. L11 de NESOLO terminaba pisando el "No...").
+                        e0 = min(e0, max(next_first_s - 0.02,
+                                         float(last_real["e"]) + 0.05))
                     e0 = min(float(dur), e0)
                 else:
                     # toda la run está interpolada (sin anclas reales): su
@@ -855,6 +1372,10 @@ def render(sid: str, payload: dict):
                         e0 = min(dur, run[-1]["e"] + pad_after)
                         if run[-1].get("sim", 1.0) <= 0.55 or run[-1].get("tj") is None:
                             e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
+                # ---- fronteras de voz reales (v20): recortar del inicio la
+                # cola de la frase anterior y extender el final hasta el último
+                # valle antes del arranque de la frase siguiente ----
+                s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
                 if e0 - s0 > 0.05:
                     segments.append((s0, e0, ptext))
 
@@ -930,7 +1451,6 @@ def render(sid: str, payload: dict):
         "timeline": timeline,
     }
 
-
 def _upload_render_safe(sid, fname, local_path):
     """Sube el render a la nube y poda los renders viejos. Nunca lanza."""
     try:
@@ -939,7 +1459,6 @@ def _upload_render_safe(sid, fname, local_path):
             _prune_renders(sid)
     except Exception:
         pass
-
 
 @app.get("/api/songs/{sid}/render/{fname}")
 def render_file(sid: str, fname: str):
@@ -955,7 +1474,6 @@ def render_file(sid: str, fname: str):
     return FileResponse(str(f), media_type="audio/mpeg",
                         headers={"Cache-Control": "no-store"},
                         filename=f"frases_{sid}.mp3")
-
 
 # ---------------------------------------------------------------- proceso
 def _process_song_impl(sid):
@@ -1077,7 +1595,6 @@ def _process_song_impl(sid):
         song["error"] = str(e)[:500]
         song["phase"] = None
         store.save_song(sid, song, durable=True)
-
 
 if __name__ == "__main__":
     import uvicorn
