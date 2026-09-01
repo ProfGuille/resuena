@@ -1044,7 +1044,7 @@ function setupSelAudio(){
   });
   selAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(selAudio.duration); });
   selAudio.addEventListener('error', () => {
-    if (state.selUrl){
+    if (state.selUrl && !_selAudioHandling){
       const w = $('renderWarn');
       w.textContent = 'El audio anterior se perdió (el servidor se reinició o se durmió). Tocá de nuevo "Generar audio con mis frases".';
       w.style.display = '';
@@ -1096,8 +1096,12 @@ function onSeek(v){
  * nube todavía en curso), se reintenta varias veces ANTES de mostrar error.
  * Mientras tanto el botón muestra "preparando…" para que no parezca roto. */
 let _selAudioTries = 0;
+let _selAudioHandling = false;   // (v30) loadSelAudio está reintentando: el
+                                 // handler de error de abajo no debe mostrar
+                                 // el mensaje "se perdió" mientras tanto
 function loadSelAudio(url, onReady){
   _selAudioTries = 0;
+  _selAudioHandling = true;
   const tryLoad = () => {
     selAudio.onerror = null;
     selAudio.src = url + '?v=' + Date.now();
@@ -1105,6 +1109,7 @@ function loadSelAudio(url, onReady){
     const ok = () => {
       selAudio.onerror = null;
       _selAudioTries = 0;
+      _selAudioHandling = false;
       if (onReady) onReady();
     };
     selAudio.oncanplaythrough = ok;
@@ -1115,6 +1120,7 @@ function loadSelAudio(url, onReady){
         setTimeout(tryLoad, 900);
       } else {
         selAudio.onerror = null;
+        _selAudioHandling = false;
         $('btnSelPlay').textContent = '▶ Escuchar';
         const w = $('renderWarn');
         w.textContent = '⚠ El audio tardó demasiado (el servidor estaba arrancando). Tocá de nuevo el play o "Generar audio con mis frases".';
