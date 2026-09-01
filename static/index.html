@@ -1167,7 +1167,7 @@ async function generateRender(){
     state.selUrl = j.url;
     state.timeline = j.timeline || null;
     state.rainOn = true;    // audio generado con las frases: la lluvia puede salir
-    $('dlLink').href = u;
+    $('dlLink').href = j.url;
     // nota con las frases REALMENTE incluidas (visibles = nada se cuela)
     const inc = (j.phrases||[]).filter(p => p.ok).map(p => p.text).filter(Boolean);
     let note = `${j.segments} fragmento${j.segments===1?'':'s'} · ${fmt(j.duration)} de audio`;
