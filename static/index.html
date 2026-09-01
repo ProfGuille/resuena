@@ -227,6 +227,10 @@
     max-width:min(60vw,420px);font-weight:800;letter-spacing:.5px;
     color:var(--sel);text-shadow:0 0 14px rgba(255,209,102,.6),0 3px 8px rgba(0,0,0,.65);
     opacity:0;animation:rainfall linear forwards;will-change:transform,opacity;line-height:1.15}
+  /* lluvia multicolor: 3 colores de alto contraste sobre el fondo oscuro */
+  .raindrop.c-amarillo{color:#ffd166;text-shadow:0 0 14px rgba(255,209,102,.6),0 3px 8px rgba(0,0,0,.65)}
+  .raindrop.c-cian{color:#22d3ee;text-shadow:0 0 14px rgba(34,211,238,.55),0 3px 8px rgba(0,0,0,.65)}
+  .raindrop.c-verde{color:#4ade80;text-shadow:0 0 14px rgba(74,222,128,.5),0 3px 8px rgba(0,0,0,.65)}
   @keyframes rainfall{0%{transform:translateY(0) rotate(var(--rot,0deg)) scale(.9);opacity:0}
     8%{opacity:.95}90%{opacity:.85}100%{transform:translateY(118vh) rotate(var(--rot,0deg)) scale(1.05);opacity:0}}
 </style>
@@ -339,7 +343,7 @@
   </div>
 </section>
 
-<footer>Resuena · las frases que te resuenan · procesamiento con <b>faster-whisper</b> + <b>ffmpeg</b> (todo gratuito)<br><span id="storageInfo"></span></footer>
+<footer>Resuena · las frases que te resuenan de una canción · <b>hecha por Guillermo Bauchwitz</b> con la colaboración de AI</b> · procesamiento con <b>faster-whisper</b> + <b>ffmpeg</b> (todo gratuito)<br><span id="storageInfo"></span></footer>
 
 <!-- ===================== MODAL SUBIR ===================== -->
 <div class="overlay" id="uploadOv">
@@ -643,7 +647,9 @@ function spawnRainDrop(phrases, forcedText){
     ? active
     : phrases[Math.floor(Math.random() * phrases.length)];
   const d = document.createElement('div');
-  d.className = 'raindrop';
+  // lluvia multicolor: amarillo / cian / verde (buen contraste sobre el fondo)
+  const RAIN_CLASSES = ['c-amarillo', 'c-cian', 'c-verde'];
+  d.className = 'raindrop ' + RAIN_CLASSES[Math.floor(Math.random() * RAIN_CLASSES.length)];
   d.textContent = fr;
   // tipografía adaptativa: las frases largas bajan el tamaño para no salirse
   const fs = Math.max(15, Math.min(40, 32 - fr.length * 0.35)) * (0.85 + Math.random() * 0.3);
@@ -1080,6 +1086,15 @@ async function generateRender(){
       let list = inc.slice(0, INC_MAX).join(' · ');
       if (inc.length > INC_MAX) list += ` · +${inc.length - INC_MAX} más`;
       note += `<br><small class="inc">Incluye: ${esc(list)}</small>`;
+    }
+    // cuántas veces se repite cada frase (incluir todas las apariciones)
+    const reps = (j.phrases||[]).filter(p => p.ok && (p.repeticiones||1) > 1);
+    if (reps.length){
+      const repParts = reps.map(p => {
+        const t = (p.text||'').trim();
+        return `«${t.length>30 ? t.slice(0,30)+'…' : t}» ×${p.repeticiones}`;
+      });
+      note += `<br><small class="inc">🔁 Frases que se repiten: ${esc(repParts.join(' · '))}</small>`;
     }
     $('renderNote').innerHTML = note;
     const w = $('renderWarn');
