@@ -196,10 +196,11 @@
   .stat b{color:var(--sel)}
   .selpanel .check{display:flex;gap:8px;align-items:center;margin:14px 0 6px;font-size:13px;color:var(--muted);cursor:pointer}
   .sel-tools{display:flex;justify-content:flex-end;margin-top:8px}
-  .selList{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:132px;overflow-y:auto}
-  .selList .ph{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted);
+  .selList{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto}
+  .selList .ph{display:flex;align-items:flex-start;gap:6px;font-size:11.5px;color:var(--muted);
     background:rgba(255,209,102,.05);border:1px solid rgba(255,209,102,.16);border-radius:8px;
     padding:3px 6px 3px 9px}
+  .selList .ph span{flex:1;min-width:0;line-height:1.45;overflow-wrap:anywhere}
   .selList .ph.more{justify-content:center;background:none;border-style:dashed;color:#6f7fa3}
   .selList .ph .x{margin-left:auto;border:none;background:none;color:#b06a6a;cursor:pointer;
     font-size:13px;line-height:1;padding:2px 5px;border-radius:5px;flex:none}
@@ -869,18 +870,19 @@ function selPhrases(){
   return out;
 }
 /* Muestra las frases seleccionadas (visibles = no se cuela ninguna que no
- * hayas elegido) con ✕ para sacar UNA sola sin perder el resto. */
+ * hayas elegido) con ✕ para sacar UNA sola sin perder el resto.
+ * Texto COMPLETO de cada frase (sin cortes): el objetivo de la lista es
+ * verificar que esté todo lo que uno quiere. Si hay muchas, la lista
+ * scrollea. */
 function renderSelList(){
   const box = $('selList');
   if (!box) return;
   const ph = selPhrases();
   box.style.display = ph.length ? '' : 'none';
-  const MAX = 8;
-  box.innerHTML = ph.slice(0, MAX).map((t,k) =>
-    `<div class="ph"><span>${esc(t.length > 38 ? t.slice(0,38)+'…' : t)}</span>` +
+  box.innerHTML = ph.map((t,k) =>
+    `<div class="ph"><span>${esc(t)}</span>` +
     `<button class="x" title="Quitar esta frase" onclick="removePhrase(${k})">✕</button></div>`
   ).join('');
-  if (ph.length > MAX) box.innerHTML += `<div class="ph more">+${ph.length - MAX} frases más</div>`;
 }
 function removePhrase(k){
   if (!state.sel[k]) return;
@@ -1034,7 +1036,7 @@ async function generateRender(){
     const inc = (j.phrases||[]).filter(p => p.ok).map(p => p.text).filter(Boolean);
     let note = `${j.segments} fragmento${j.segments===1?'':'s'} · ${fmt(j.duration)} de audio`;
     if (inc.length){
-      const INC_MAX = 6;
+      const INC_MAX = 10;
       let list = inc.slice(0, INC_MAX).join(' · ');
       if (inc.length > INC_MAX) list += ` · +${inc.length - INC_MAX} más`;
       note += `<br><small class="inc">Incluye: ${esc(list)}</small>`;
