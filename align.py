@@ -490,22 +490,29 @@ def find_phrase_repeated(transcript, phrase_words, threshold=0.68):
     return (sc, k0, k1)
 
 
-def find_all_phrase_occurrences(transcript, phrase_words, threshold=0.68):
-    """Todas las apariciones de la frase (por TEXTO, no por tj) en el transcript.
+def find_all_phrase_occurrences(transcript, phrase_words, threshold=0.80):
+    """Todas las apariciones de la frase (por TEXTO) en el transcript.
 
-    Dos estrategias, según la forma de la frase:
+    Diseño (v25, tras el bug "naciones"->"tentación"):
 
-    A) Frase NO repetitiva (p. ej. "No tengas miedo y confía en mí que nada va
-       a pasar"): ventanas de longitud exacta a lo largo de todo el transcript
-       con fuzzy matching (umbral alto: 0.68). Se aceptan las ventanas no
-       solapadas por mejor puntaje.
+    A) UNA palabra: match >= 0.85 o contención ("tempiedad" contiene
+       "piedad"; "solos" contiene "solo"). El umbral 0.68 anterior hacía que
+       "naciones" (0.71) matcheara "tentación" y la repetición sonara a otra
+       frase; ahora un match suelto queda AFUERA.
 
-    B) Frase que es repetición limpia de una unidad (p. ej. "Ten piedad, ten
-       piedad" -> unidad "ten piedad", ya que whisper suele fundir las
-       palabras cantadas en una: "tempiedad"): se marcan los índices del
-       transcript cuya palabra más distintiva de la unidad matchea fuerte
-       (umbral 0.75) y se agrupan los índices consecutivos en pasajes (un
-       pasaje que canta la unidad varias veces seguidas es UNA aparición).
+    B) Frase de 2+ palabras: se elige la palabra CLAVE más distintiva (la
+       menos frecuente en el transcript, con preferencia por la más larga) y
+       se marcan sus hits fuertes (>= 0.80, incluye contención por fusión de
+       palabras cantadas). Los hits consecutivos forman un pasaje (una
+       aparición). Un pasaje se acepta si:
+         - tiene 2+ hits consecutivos (la unidad cantada repetida: "tempiedad
+           tempiedad"), o
+         - algún hit matchea muy fuerte (>= 0.90, p. ej. contención de
+           "tempiedad" con "piedad"), o
+         - el contexto alrededor matchea al menos una de las OTRAS palabras
+           de la frase (evita que la clave en un contexto distinto se cuele).
+    Esto no depende de que whisper transcriba toda la frase igual: alcanza
+    con que la palabra distintiva esté bien (o fusionada).
 
     Devuelve [(k0, k1, score)] no solapadas, ordenadas por tiempo.
     """
@@ -514,57 +521,132 @@ def find_all_phrase_occurrences(transcript, phrase_words, threshold=0.68):
     if not q:
         return []
     n = len(q)
+    if n == 1:
+        return _find_single_occurrences(transcript, q[0])
     unit = None
     for u in range(1, n // 2 + 1):
         if n % u == 0 and all(q[i:i + u] == q[:u] for i in range(0, n, u)):
             unit = q[:u]
             break
     if unit is not None and len(unit) < n:
-        return _find_unit_occurrences(transcript, unit)
-    return _find_full_occurrences(transcript, q, threshold)
+        q = unit
+    return _find_key_occurrences(transcript, q)
 
 
-def _find_full_occurrences(transcript, q, threshold=0.68):
-    """Estrategia A: ventanas de longitud exacta, no solapadas, por mejor score."""
-    L = len(q)
-    T = len(transcript)
-    if T < L:
+def _w_sim(a, b):
+    """Similitud entre dos palabras normalizadas:
+      - 1.0 si son iguales;
+      - 0.92 si una contiene a la otra (whisper funde palabras cantadas:
+        "tempiedad" contiene "piedad", "solos" contiene "solo"); se exige
+        longitud >= 4 para no matchear "te"/"en" dentro de cualquier
+        palabra ("ten" NO contiene-match "tentación");
+      - si no, el ratio de edición.
+    """
+    if a == b:
+        return 1.0
+    if len(a) >= 4 and len(b) >= 4 and (a in b or b in a):
+        return 0.92
+    return fuzz.ratio(a, b) / 100.0
+
+
+def _find_single_occurrences(transcript, q0, threshold=0.85):
+    """Estrategia A: una sola palabra -> match fuerte o contención."""
+    hits = []
+    for i, w in enumerate(transcript):
+        t = norm(str(w.get("word", "")))
+        if t and _w_sim(q0, t) >= threshold:
+            hits.append((i, i, 1.0))
+    return hits
+
+
+def _find_key_occurrences(transcript, q, thr=0.80):
+    """Estrategia B: hits de la palabra clave distintiva + verificación de
+    contexto (agrupa hits consecutivos en pasajes)."""
+    if not q:
         return []
-    cands = []
-    for k in range(0, T - L + 1):
-        win = [norm(str(w.get("word", ""))) for w in transcript[k:k + L]]
-        if all(a == b for a, b in zip(q, win)):
-            sc = 1.0
-        else:
-            sc = sum(fuzz.ratio(a, b) / 100.0 for a, b in zip(q, win)) / L
-        if sc >= threshold:
-            cands.append((k, k + L - 1, sc))
-    cands.sort(key=lambda c: -c[2])
-    occs = []
-    for k0, k1, sc in cands:
-        if all(k1 < ok0 or k0 > ok1 for ok0, ok1, _ in occs):
-            occs.append((k0, k1, sc))
-    occs.sort()
-    return occs
-
-
-def _find_unit_occurrences(transcript, unit, threshold=0.75):
-    """Estrategia B: hits de la palabra más distintiva de la unidad, agrupando
-    los índices consecutivos (la unidad cantada varias veces seguidas es una
-    sola aparición del pasaje)."""
-    key = max(unit, key=len)
-    T = len(transcript)
-    hits = [i for i, w in enumerate(transcript)
-            if fuzz.ratio(key, norm(str(w.get("word", "")))) / 100.0 >= threshold]
-    occs = []
+    # frecuencia de cada palabra en el transcript
+    freq = {}
+    tw_norm = []
+    for w in transcript:
+        t = norm(str(w.get("word", "")))
+        if t:
+            tw_norm.append(t)
+            freq[t] = freq.get(t, 0) + 1
+    # CLAVE: la palabra que matchea fuerte en MÁS lugares del transcript (las
+    # repeticiones reales), porque whisper transcribe la voz cantada distinto
+    # en cada repetición ("tengas" -> "hagas"/"tendrás"; elegir "tengas" por
+    # ser rara perdía las otras repeticiones). Entre las que tienen >= 2 hits
+    # se prefiere la MENOS frecuente (más distintiva) y la más larga. Si
+    # ninguna tiene 2+ hits (frase que suena una sola vez), la menos
+    # frecuente.
+    def _hits(w):
+        return sum(1 for t in tw_norm if _w_sim(w, t) >= 0.80)
+    pool = [w for w in q if _hits(w) >= 2] or q
+    clave = min(pool, key=lambda w: (freq.get(w, 10 ** 9), -len(w)))
+    # OTRAS palabras DISTINTIVAS para verificar el contexto: se excluyen las
+    # demasiado comunes ("por","los","que","la","de"...), porque un contexto
+    # con solo palabras comunes matchea cualquier frase (p. ej. "sufren la
+    # tentación" entraba como repetición de "...sufren la indiferencia...").
+    _COMUNES = {"por", "los", "las", "que", "la", "el", "de", "del", "a",
+                "en", "y", "o", "un", "una", "con", "se", "su", "sus", "no",
+                "lo", "al", "te", "mi", "tu", "es", "mas", "ya", "me"}
+    others = [a for a in q if a != clave
+              and len(a) >= 4 and a not in _COMUNES]
+    hits = []
+    for i, w in enumerate(transcript):
+        t = norm(str(w.get("word", "")))
+        if t and _w_sim(clave, t) >= thr:
+            hits.append(i)
+    # agrupar hits consecutivos -> pasajes
+    groups = []
     run = []
     for i in hits:
         if run and i != run[-1] + 1:
-            occs.append((run[0], run[-1], 1.0))
+            groups.append(run)
             run = []
         run.append(i)
     if run:
-        occs.append((run[0], run[-1], 1.0))
+        groups.append(run)
+    T = len(transcript)
+    offset = q.index(clave)          # posición de la clave dentro de la frase
+    L = len(q)
+    occs = []
+    for g in groups:
+        lo = max(0, g[0] - 2)
+        hi = min(T, g[-1] + 3)
+        ctx = [norm(str(w.get("word", ""))) for w in transcript[lo:hi]]
+        # contexto: debe matchear al menos una palabra DISTINTIVA de la
+        # frase (no las comunes); si la frase no tiene otras distintivas
+        # (p. ej. "ten piedad" -> solo "piedad"), el hit fuerte de la clave
+        # alcanza.
+        ctx_ok = (len(others) == 0
+                  or any(_w_sim(a, t) >= 0.75
+                         for a in others for t in ctx))
+        if len(g) >= 2 or ctx_ok:
+            # expandir el pasaje a la frase COMPLETA, verificando palabra a
+            # palabra (NO avanzar/retroceder sobre transcript que no matchea
+            # la frase): evita que una palabra vecina ("saberlo") se cuele en
+            # "ten piedad" por el offset de la clave.
+            k0 = g[0]
+            pos = offset - 1
+            while pos >= 0 and k0 > 0:
+                cand = norm(str(transcript[k0 - 1].get("word", "")))
+                if cand and _w_sim(q[pos], cand) >= 0.72:
+                    k0 -= 1
+                    pos -= 1
+                else:
+                    break
+            k1 = g[-1]
+            pos = offset + (g[-1] - g[0]) + 1
+            while pos < L and k1 < T - 1:
+                cand = norm(str(transcript[k1 + 1].get("word", "")))
+                if cand and _w_sim(q[pos], cand) >= 0.72:
+                    k1 += 1
+                    pos += 1
+                else:
+                    break
+            if k1 >= k0:
+                occs.append((k0, k1, 1.0))
     return occs
 
 

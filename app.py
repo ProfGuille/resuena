@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v24"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v25"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -1277,55 +1277,64 @@ def render(sid: str, payload: dict):
                         segments.append((s0, e0, ptext))
                     continue
                 occs = occs_fn(transcript, run)
-                if not occs:
-                    # respaldo: al menos la aparición primaria
-                    s0 = max(0.0, run[0]["s"] - 0.15)
-                    e0 = min(dur, run[-1]["e"] + 0.25)
-                    s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
+                # (v25) la posición PRIMARIA (la frase que elegiste, anclada
+                # por el align a su lugar en la canción) SIEMPRE va: es la
+                # que el usuario pidió. Las repeticiones encontradas por
+                # texto se suman DESPUÉS, sin duplicar la primaria.
+                s_prim = max(0.0, run[0]["s"] - 0.15)
+                e_prim = min(dur, run[-1]["e"] + 0.25)
+                s_prim, e_prim = _apply_voice_boundaries(
+                    song, flat, run, run_i, s_prim, e_prim, dur, src)
+                if e_prim - s_prim > 0.05:
+                    segments.append((s_prim, e_prim, ptext))
+                env = _rms_env(src)
+                usadas = [(s_prim, e_prim)]
+                n_rep = 0
+                for k0, k1, _ in occs:
+                    fs_occ = float(transcript[k0]["start"])
+                    le_occ = float(transcript[k1]["end"])
+                    prev_e = (float(transcript[k0 - 1]["end"])
+                              if k0 > 0 else None)
+                    nxt_s = (float(transcript[k1 + 1]["start"])
+                             if k1 + 1 < len(transcript) else None)
+                    s0 = max(0.0, fs_occ - 0.25)
+                    e0 = min(dur, le_occ + 0.20)
+                    # whisper a veces pone el inicio de la palabra TARDE en la
+                    # voz cantada ("tempiedad" = "ten piedad" con el "Ten"
+                    # ~1.2 s antes): si hay un ataque fuerte y claro ANTES del
+                    # timestamp (desde el final de la palabra previa del
+                    # transcript) y arranca desde silencio real, ese ataque
+                    # ES el arranque de la frase.
+                    if prev_e is not None:
+                        st = _strong_onset(env, prev_e - 0.02,
+                                           fs_occ + 0.60, 0.045)
+                        if (st is not None
+                                and fs_occ - 1.50 <= st < fs_occ - 0.30):
+                            k_st = max(1, _idx(st))
+                            base0 = float(
+                                env[max(0, k_st - 20):k_st].min())
+                            if base0 < 0.06:
+                                s0 = st
+                    s0, e0 = _apply_voice_boundaries(
+                        song, flat, run, run_i, s0, e0, dur, src,
+                        first_s_ov=fs_occ, lo_end_ov=le_occ,
+                        prev_end_ov=prev_e, next_first_s_ov=nxt_s,
+                        occ_mode=True)
                     if e0 - s0 > 0.05:
+                        # no duplicar la primaria ni otra repetición ya usada
+                        # (solape directo: dos intervalos que comparten audio
+                        # son la misma aparición)
+                        if any(s0 < ue - 0.02 and us < e0 - 0.02
+                               for us, ue in usadas):
+                            continue
+                        usadas.append((s0, e0))
                         segments.append((s0, e0, ptext))
-                    if phrases:
-                        phrases[-1]["repeticiones"] = max(
-                            phrases[-1].get("repeticiones", 1), 1)
-                else:
-                    if phrases:
-                        phrases[-1]["repeticiones"] = max(
-                            phrases[-1].get("repeticiones", 1), len(occs))
-                    env = _rms_env(src)
-                    for k0, k1, _ in occs:
-                        fs_occ = float(transcript[k0]["start"])
-                        le_occ = float(transcript[k1]["end"])
-                        prev_e = (float(transcript[k0 - 1]["end"])
-                                  if k0 > 0 else None)
-                        nxt_s = (float(transcript[k1 + 1]["start"])
-                                 if k1 + 1 < len(transcript) else None)
-                        s0 = max(0.0, fs_occ - 0.25)
-                        e0 = min(dur, le_occ + 0.20)
-                        # (v24) whisper a veces pone el inicio de la palabra
-                        # TARDE en la voz cantada (hasta ~1 s: p. ej. "Ten
-                        # piedad" transcrito "Tempiedad" con el "Ten" ~1.2 s
-                        # antes). Si hay un ataque fuerte y claro en un rango
-                        # acotado antes del timestamp, y arranca desde
-                        # silencio real, ese ataque ES el arranque de la
-                        # frase (el límite de 1.5 s evita cruzar un pasaje
-                        # instrumental entero).
-                        if prev_e is not None:
-                            st = _strong_onset(env, prev_e - 0.02,
-                                               fs_occ + 0.60, 0.045)
-                            if (st is not None
-                                    and fs_occ - 1.50 <= st < fs_occ - 0.30):
-                                k_st = max(1, _idx(st))
-                                base0 = float(
-                                    env[max(0, k_st - 20):k_st].min())
-                                if base0 < 0.06:
-                                    s0 = st
-                        s0, e0 = _apply_voice_boundaries(
-                            song, flat, run, run_i, s0, e0, dur, src,
-                            first_s_ov=fs_occ, lo_end_ov=le_occ,
-                            prev_end_ov=prev_e, next_first_s_ov=nxt_s,
-                            occ_mode=True)
-                        if e0 - s0 > 0.05:
-                            segments.append((s0, e0, ptext))
+                        n_rep += 1
+                if phrases:
+                    # repeticiones = número REAL de fragmentos (primaria +
+                    # las que sumó el matcher)
+                    phrases[-1]["repeticiones"] = max(
+                        phrases[-1].get("repeticiones", 1), 1 + n_rep)
             else:
                 # robustez: si los timestamps del tramo son inverosímiles
                 # (huecos enormes entre palabras contiguas -> el align unió la
