@@ -1254,7 +1254,29 @@ def render(sid: str, payload: dict):
                 # y no se incluía ninguna repetición). Cada aparición usa las
                 # fronteras de voz de SU propia posición (overrides), no las
                 # de la línea lírica.
-                occs = align.find_all_phrase_occurrences(transcript, run)
+                # (v24) la búsqueda por texto vive en align.py: si el archivo
+                # desplegado es viejo (deploy parcial sin align.py), no
+                # romper con 500: degradar al camino por tj de antes.
+                occs_fn = getattr(align, "find_all_phrase_occurrences", None)
+                if occs_fn is None:
+                    tjs_old = [w.get("tj") for w in run if w.get("tj") is not None]
+                    if tjs_old:
+                        j0o, j1o = min(tjs_old), max(tjs_old)
+                        for k0o, k1o, _ in align.find_occurrences(transcript, j0o, j1o):
+                            s0o = max(0.0, transcript[k0o]["start"] - 0.15)
+                            e0o = min(dur, transcript[k1o]["end"] + 0.25)
+                            s0o, e0o = _apply_voice_boundaries(
+                                song, flat, run, run_i, s0o, e0o, dur, src)
+                            if e0o - s0o > 0.05:
+                                segments.append((s0o, e0o, ptext))
+                        continue
+                    s0 = max(0.0, run[0]["s"] - 0.15)
+                    e0 = min(dur, run[-1]["e"] + 0.25)
+                    s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
+                    if e0 - s0 > 0.05:
+                        segments.append((s0, e0, ptext))
+                    continue
+                occs = occs_fn(transcript, run)
                 if not occs:
                     # respaldo: al menos la aparición primaria
                     s0 = max(0.0, run[0]["s"] - 0.15)

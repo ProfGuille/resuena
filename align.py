@@ -490,6 +490,84 @@ def find_phrase_repeated(transcript, phrase_words, threshold=0.68):
     return (sc, k0, k1)
 
 
+def find_all_phrase_occurrences(transcript, phrase_words, threshold=0.68):
+    """Todas las apariciones de la frase (por TEXTO, no por tj) en el transcript.
+
+    Dos estrategias, según la forma de la frase:
+
+    A) Frase NO repetitiva (p. ej. "No tengas miedo y confía en mí que nada va
+       a pasar"): ventanas de longitud exacta a lo largo de todo el transcript
+       con fuzzy matching (umbral alto: 0.68). Se aceptan las ventanas no
+       solapadas por mejor puntaje.
+
+    B) Frase que es repetición limpia de una unidad (p. ej. "Ten piedad, ten
+       piedad" -> unidad "ten piedad", ya que whisper suele fundir las
+       palabras cantadas en una: "tempiedad"): se marcan los índices del
+       transcript cuya palabra más distintiva de la unidad matchea fuerte
+       (umbral 0.75) y se agrupan los índices consecutivos en pasajes (un
+       pasaje que canta la unidad varias veces seguidas es UNA aparición).
+
+    Devuelve [(k0, k1, score)] no solapadas, ordenadas por tiempo.
+    """
+    q = [norm(str(w.get("raw", ""))) for w in phrase_words]
+    q = [x for x in q if x]
+    if not q:
+        return []
+    n = len(q)
+    unit = None
+    for u in range(1, n // 2 + 1):
+        if n % u == 0 and all(q[i:i + u] == q[:u] for i in range(0, n, u)):
+            unit = q[:u]
+            break
+    if unit is not None and len(unit) < n:
+        return _find_unit_occurrences(transcript, unit)
+    return _find_full_occurrences(transcript, q, threshold)
+
+
+def _find_full_occurrences(transcript, q, threshold=0.68):
+    """Estrategia A: ventanas de longitud exacta, no solapadas, por mejor score."""
+    L = len(q)
+    T = len(transcript)
+    if T < L:
+        return []
+    cands = []
+    for k in range(0, T - L + 1):
+        win = [norm(str(w.get("word", ""))) for w in transcript[k:k + L]]
+        if all(a == b for a, b in zip(q, win)):
+            sc = 1.0
+        else:
+            sc = sum(fuzz.ratio(a, b) / 100.0 for a, b in zip(q, win)) / L
+        if sc >= threshold:
+            cands.append((k, k + L - 1, sc))
+    cands.sort(key=lambda c: -c[2])
+    occs = []
+    for k0, k1, sc in cands:
+        if all(k1 < ok0 or k0 > ok1 for ok0, ok1, _ in occs):
+            occs.append((k0, k1, sc))
+    occs.sort()
+    return occs
+
+
+def _find_unit_occurrences(transcript, unit, threshold=0.75):
+    """Estrategia B: hits de la palabra más distintiva de la unidad, agrupando
+    los índices consecutivos (la unidad cantada varias veces seguidas es una
+    sola aparición del pasaje)."""
+    key = max(unit, key=len)
+    T = len(transcript)
+    hits = [i for i, w in enumerate(transcript)
+            if fuzz.ratio(key, norm(str(w.get("word", "")))) / 100.0 >= threshold]
+    occs = []
+    run = []
+    for i in hits:
+        if run and i != run[-1] + 1:
+            occs.append((run[0], run[-1], 1.0))
+            run = []
+        run.append(i)
+    if run:
+        occs.append((run[0], run[-1], 1.0))
+    return occs
+
+
 def find_occurrences(transcript, j0, j1, threshold=0.72):
     """Busca TODAS las apariciones de la ventana [j0..j1] en el transcript.
 
