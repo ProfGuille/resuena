@@ -623,9 +623,12 @@ async function updateOccInfo(){
     if (!occ.length){
       el.textContent = 'Ninguna de tus frases se repite en la letra (solo se incluirá 1 vez).';
     } else {
+      // (v27) conteo REAL: cada aparición de la frase en la letra = 1
+      // (una línea con "Ten piedad, Ten piedad" cuenta 2, no 1), y es el
+      // mismo número que después suena en el audio generado.
       el.innerHTML = '🔁 ' + occ.map(o => {
         const t = (o.text||'').trim();
-        return `«${t.length>32 ? t.slice(0,32)+'…' : t}» aparece ${o.count} veces`;
+        return `«${t.length>32 ? t.slice(0,32)+'…' : t}» aparece ${o.count} ${o.count===1?'vez':'veces'} en la letra`;
       }).join(' · ');
     }
     el.style.display = '';
@@ -1032,8 +1035,12 @@ function setupSelAudio(){
 
 function setupFullAudio(){
   fullAudio.pause(); fullAudio.src = '';
-  $('curTime').textContent = '0:00'; $('totTime').textContent = '0:00'; $('seekBar').value = 0;
-  fullAudio.src = `/api/songs/${state.song.id}/audio`;
+  $('curTime').textContent = '0:00'; $('seekBar').value = 0;
+  // (v27) la canción completa se baja SOLO al tocar play: abrir una canción
+  // no descarga el mp3 entero (en Render free eso tardaba varios segundos y
+  // los botones parecían no responder). La duración sale de los datos.
+  $('totTime').textContent = fmt(state.song && state.song.duration || 0);
+  fullAudio.preload = 'metadata';
 }
 function setMode(m){
   state.mode = m;
@@ -1048,6 +1055,8 @@ function togglePlay(){
     else { selAudio.pause(); }
   } else {
     if (selAudio) selAudio.pause();
+    // carga perezosa: el mp3 completo recién se pide acá (primera vez)
+    if (!fullAudio.src) fullAudio.src = `/api/songs/${state.song.id}/audio`;
     if (fullAudio.paused){ fullAudio.play(); $('btnPlay').textContent='⏸'; }
     else { fullAudio.pause(); $('btnPlay').textContent='▶'; }
   }
