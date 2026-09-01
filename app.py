@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v17"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v18"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -567,6 +567,17 @@ def _speech_tail(src, s0, e0, dur, transcript, next_start=None):
         return e0
 
 
+def _is_real_anchor(w):
+    """¿La palabra tiene un match REAL en el transcript?
+
+    Las palabras "m=True pero tj=None / sim=0.5" tienen timestamps FALSOS
+    (interpolados): no sirven como anclas de posición.
+    """
+    return bool(w.get("m")) and w.get("tj") is not None \
+        and w.get("sim", 1.0) > 0.55 \
+        and w.get("s") is not None and w.get("e") is not None
+
+
 @app.post("/api/songs/{sid}/render")
 def render(sid: str, payload: dict):
     song = store.get_song(sid)
@@ -619,14 +630,55 @@ def render(sid: str, payload: dict):
                     cur = []
         if cur:
             runs.append(cur)
+        # respaldo POSICIONAL (se calcula UNA vez por rango): la frase no tiene
+        # audio en su posición (el modelo la transcribió mal ahí). Pero SABEMOS
+        # dónde está en la canción: entre la última palabra REAL con audio que
+        # viene antes y la primera REAL que viene después. Repartimos ese hueco
+        # proporcionalmente entre las palabras de la letra sin audio que hay en
+        # el medio. Es LOCAL: nunca trae audio de otra parte de la canción (el
+        # fallback fuzzy sí podía agarrar un coro lejano y sonar una frase que
+        # no se eligió).
+        pos_seg = None
+        prev_i = a - 1
+        while prev_i >= 0 and not _is_real_anchor(flat[prev_i][2]):
+            prev_i -= 1
+        nxt_i = b + 1
+        while nxt_i < total and not _is_real_anchor(flat[nxt_i][2]):
+            nxt_i += 1
+        if prev_i >= 0 and nxt_i < total:
+            pv = flat[prev_i][2]
+            nx = flat[nxt_i][2]
+            if pv.get("e") is not None and nx.get("s") is not None:
+                gap_words = nxt_i - prev_i - 1
+                sel_words = b - a + 1
+                gap_s = float(pv["e"])
+                gap_e = float(nx["s"])
+                gap_dur = gap_e - gap_s
+                # sel == gap_words: la selección es TODO el hueco (caso típico
+                # de elegir una línea completa sin audio). Solo se acepta si el
+                # hueco no es enorme: un hueco grande casi siempre mezcla
+                # instrumental/otras frases, y dar el hueco entero sonaría a
+                # otra cosa.
+                whole_gap = sel_words >= gap_words
+                if (gap_words >= 1 and sel_words >= 1
+                        and (sel_words < gap_words
+                             or (whole_gap and gap_dur <= 20.0))
+                        and 0.2 < gap_dur <= 60
+                        and gap_dur / gap_words <= 6.0):
+                    off0 = a - prev_i - 1
+                    off1 = b - prev_i
+                    s0 = max(0.0, gap_s + (off0 / gap_words) * gap_dur)
+                    e0 = min(dur, gap_s + (off1 / gap_words) * gap_dur)
+                    if e0 - s0 > 0.05:
+                        pos_seg = (s0, e0)
         if not runs:
-            # respaldo GENERAL: la frase no tiene audio en esta posición (el
-            # modelo tiny la transcribió mal AHÍ), pero puede estar bien
-            # transcrita en otra aparición del audio (p. ej. un estribillo
-            # repetido que en una aparición se oye claro y en otra el coro lo
-            # tapa). Buscar la frase completa en el transcript y usar esa
-            # aparición: es mejor que sonar la frase (aunque de otra parte)
-            # que no sonar nada.
+            if pos_seg:
+                segments.append(pos_seg)
+                continue
+            # respaldo GENERAL (SOLO si el posicional no aplicó): la frase no
+            # tiene audio en su posición ni vecinos confiables, pero puede
+            # estar bien transcrita en OTRA aparición del audio (p. ej. un
+            # estribillo repetido). Último recurso.
             fb = align.find_phrase_repeated(transcript, words)
             if fb:
                 sc, k0, k1 = fb
@@ -640,46 +692,6 @@ def render(sid: str, payload: dict):
                 if e0 - s0 > 0.05:
                     segments.append((s0, e0))
                     continue
-            # respaldo POSICIONAL: la frase no aparece en el transcript ni
-            # siquiera en otra aparición (el coro "Kyrie Eleison" quedó como
-            # "unirilé y sol"). Pero SABEMOS dónde está en la canción: entre
-            # la última palabra con audio que viene antes y la primera con
-            # audio que viene después. Repartimos ese hueco proporcionalmente
-            # entre las palabras de la letra sin audio que hay en el medio.
-            prev_i = a - 1
-            while prev_i >= 0 and not flat[prev_i][2].get("m"):
-                prev_i -= 1
-            nxt_i = b + 1
-            while nxt_i < total and not flat[nxt_i][2].get("m"):
-                nxt_i += 1
-            if prev_i >= 0 and nxt_i < total:
-                pv = flat[prev_i][2]
-                nx = flat[nxt_i][2]
-                if pv.get("e") is not None and nx.get("s") is not None:
-                    gap_words = nxt_i - prev_i - 1
-                    sel_words = b - a + 1
-                    gap_s = float(pv["e"])
-                    gap_e = float(nx["s"])
-                    gap_dur = gap_e - gap_s
-                    # sel == gap_words: la selección es TODO el hueco (caso
-                    # típico de elegir una línea completa sin audio). Solo se
-                    # acepta si el hueco no es enorme: un hueco grande casi
-                    # siempre mezcla instrumental/otras frases, y dar el hueco
-                    # entero sonaría a otra cosa.
-                    whole_gap = sel_words >= gap_words
-                    if (gap_words >= 1 and sel_words >= 1
-                            and (sel_words < gap_words
-                                 or (whole_gap and gap_dur <= 20.0))):
-                        # umbral de confianza: el hueco no puede ser enorme
-                        # (sería instrumental/silencio, no la frase)
-                        if 0.2 < gap_dur <= 60 and gap_dur / gap_words <= 6.0:
-                            off0 = a - prev_i - 1
-                            off1 = b - prev_i
-                            s0 = max(0.0, gap_s + (off0 / gap_words) * gap_dur)
-                            e0 = min(dur, gap_s + (off1 / gap_words) * gap_dur)
-                            if e0 - s0 > 0.05:
-                                segments.append((s0, e0))
-                                continue
             if phrases:
                 phrases[-1]["ok"] = False
             skipped += 1
@@ -731,14 +743,83 @@ def render(sid: str, payload: dict):
                     # frases largas: un pequeño margen natural de respiración
                     pad_before = 0.15
                     pad_after = 0.25
-                s0 = max(0.0, run[0]["s"] - pad_before)
-                e0 = min(dur, run[-1]["e"] + pad_after)
-                # el timestamp del final puede cortar la última palabra cuando
-                # quedó interpolada (sim=0.5, sin match en el transcript):
-                # extender el corte hasta que la voz termina de verdad
-                last = run[-1]
-                if last.get("sim", 1.0) <= 0.55 or last.get("tj") is None:
-                    e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
+
+                # ---- límites con ANCLAS REALES + transcript ----
+                # Una palabra es "ancla real" si tiene match de verdad en el
+                # transcript (tj asignado y sim alto). Las demás (m=True pero
+                # tj=None / sim=0.5) tienen timestamps FALSOS (interpolados a
+                # 0.2s): usarlas como borde corta la frase a la mitad (p. ej.
+                # "...sufren y agoniz[an...]").
+                real_in_run = [w for w in run if _is_real_anchor(w)]
+                if real_in_run:
+                    # ancla real previa (antes de a) y siguiente (después de b)
+                    prev_anchor_e = None
+                    j = a - 1
+                    while j >= 0 and not _is_real_anchor(flat[j][2]):
+                        j -= 1
+                    if j >= 0:
+                        prev_anchor_e = float(flat[j][2]["e"])
+                    next_anchor_s = None
+                    j = b + 1
+                    while j < total and not _is_real_anchor(flat[j][2]):
+                        j += 1
+                    if j < total:
+                        next_anchor_s = float(flat[j][2]["s"])
+                    # palabras del transcript entre las anclas: marcan dónde
+                    # canta la frase de verdad (aunque el texto esté mal
+                    # transcrito, la POSICIÓN es real)
+                    reg_start = prev_anchor_e if prev_anchor_e is not None else 0.0
+                    reg_end = next_anchor_s if next_anchor_s is not None else float(dur)
+                    region = [w for w in transcript
+                              if float(w.get("start") or 0) >= reg_start - 0.01
+                              and float(w.get("start") or 0) <= reg_end + 0.01]
+                    # START: primer ancla real; si la cabeza está interpolada,
+                    # extender hacia atrás hasta el primer transcript de la
+                    # región, acotado por un estimado por palabra (no retroceder
+                    # hasta la frase anterior cuando la región es enorme)
+                    first_real = real_in_run[0]
+                    s0 = float(first_real["s"]) - pad_before
+                    if run[0] is not first_real and region:
+                        n_soft_head = 0
+                        for w in run:
+                            if _is_real_anchor(w):
+                                break
+                            n_soft_head += 1
+                        cap0 = float(first_real["s"]) - n_soft_head * 0.85 - 0.5
+                        s0 = min(s0, max(float(region[0]["start"]) - 0.08, cap0))
+                    s0 = max(0.0, s0)
+                    if prev_anchor_e is not None:
+                        s0 = max(s0, prev_anchor_e + 0.05)
+                    # END: última ancla real; si la cola está interpolada,
+                    # extender hasta el último transcript de la región, acotado
+                    # por un estimado por palabra (si la región es enorme, no
+                    # cruzar a la próxima frase) y por el inicio de la próxima
+                    # ancla real
+                    last_real = real_in_run[-1]
+                    e0 = float(last_real["e"]) + pad_after
+                    if run[-1] is not last_real and region:
+                        n_soft = 0
+                        for w in reversed(run):
+                            if _is_real_anchor(w):
+                                break
+                            n_soft += 1
+                        cap = float(last_real["e"]) + n_soft * 0.85 + 0.5
+                        e0 = min(max(e0, float(region[-1]["end"]) + 0.15), cap)
+                    if next_anchor_s is not None:
+                        e0 = min(e0, next_anchor_s - 0.05)
+                    e0 = min(float(dur), e0)
+                else:
+                    # toda la run está interpolada (sin anclas reales): su
+                    # posición puede ser falsa (el align a veces interpola la
+                    # frase hacia OTRA parte del audio). Preferir el segmento
+                    # posicional local; si no aplica, timestamps locales.
+                    if pos_seg:
+                        s0, e0 = pos_seg
+                    else:
+                        s0 = max(0.0, run[0]["s"] - pad_before)
+                        e0 = min(dur, run[-1]["e"] + pad_after)
+                        if run[-1].get("sim", 1.0) <= 0.55 or run[-1].get("tj") is None:
+                            e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
                 if e0 - s0 > 0.05:
                     segments.append((s0, e0))
 
