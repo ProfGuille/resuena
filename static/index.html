@@ -891,12 +891,19 @@ document.addEventListener('mousemove', e => {
 });
 window.addEventListener('mouseup', e => {
   if (dragStart === null) return;
-  const from = dragStart, moved = state.dragMoved;
-  dragStart = null; state.dragPreview = null; state.dragMoved = false;
+  const from = dragStart, moved = state.dragMoved, prev = state.dragPreview;
+  dragStart = null; state.dragMoved = false; state.dragPreview = null;
   paint();
-  const i = wordAt(e.clientX, e.clientY);
+  let i = wordAt(e.clientX, e.clientY);
+  // (v32) Si se soltó FUERA de una palabra (o en un hueco entre palabras)
+  // con un arrastre en curso, NO descartar la selección: se usa el último
+  // rango que el usuario vio resaltado (state.dragPreview). Antes se
+  // cancelaba en silencio y la frase podía quedar sin pintar (p.ej. la
+  // última frase de la canción, al soltar el dedo/mouse un poco más abajo
+  // del borde) → el audio generado salía sin esa frase.
+  if (i === null && moved && prev){ addRange(prev[0], prev[1]); return; }
   if (i === null){
-    return; // se soltó fuera de las palabras: no se cambia nada
+    return; // clic suelto fuera de las palabras (sin arrastre): no cambia nada
   }
   if (!moved || i === from){
     // clic simple (sin arrastre)
@@ -1080,8 +1087,17 @@ function togglePlay(){
     else { fullAudio.pause(); $('btnPlay').textContent='▶'; }
   }
 }
+let _selAudioUrl = null;   // (v32) URL del audio actualmente cargado en selAudio
 function toggleSelPlay(){
   if (!selAudio || !state.selUrl) return;
+  // (v32) Si el audio cargado en el <audio> no corresponde al último render
+  // generado (p.ej. quedó uno viejo de una selección anterior), recargarlo
+  // ANTES de reproducir: garantiza que "▶ Escuchar" siempre suene el audio
+  // actual y nunca uno que "omita" frases por estar desactualizado.
+  if (_selAudioUrl !== state.selUrl){
+    loadSelAudio(state.selUrl, () => { selAudio.play().catch(()=>{}); });
+    return;
+  }
   if (selAudio.paused){ selAudio.play().catch(()=>{}); }
   else { selAudio.pause(); }
 }
@@ -1104,6 +1120,7 @@ function loadSelAudio(url, onReady){
   _selAudioHandling = true;
   const tryLoad = () => {
     selAudio.onerror = null;
+    _selAudioUrl = url;
     selAudio.src = url + '?v=' + Date.now();
     selAudio.load();
     const ok = () => {
@@ -1121,6 +1138,7 @@ function loadSelAudio(url, onReady){
       } else {
         selAudio.onerror = null;
         _selAudioHandling = false;
+        _selAudioUrl = null;   // el audio viejo ya no corresponde: que el play lo reintente
         $('btnSelPlay').textContent = '▶ Escuchar';
         const w = $('renderWarn');
         w.textContent = '⚠ El audio tardó demasiado (el servidor estaba arrancando). Tocá de nuevo el play o "Generar audio con mis frases".';
@@ -1198,6 +1216,9 @@ async function generateRender(){
     $('btnSelPlay').textContent = '▶ Escuchar';
     setMode('sel');
     $('btnPlay').textContent='▶';
+    // (v32) si se estaba escuchando un audio anterior, cortarlo y arrancar el
+    // nuevo desde cero (no desde la posición que tenía el viejo)
+    if (selAudio && !selAudio.paused){ selAudio.pause(); selAudio.currentTime = 0; }
     loadSelAudio(j.url);
   } catch(e){
     $('renderErr').textContent = e.message;
