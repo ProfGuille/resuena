@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v28"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v29"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -213,6 +213,47 @@ def _recheck_align():
     except Exception:
         pass
 
+def _prebuild_renders():
+    """Genera en segundo plano el render de TODAS las líneas de cada canción
+    lista (normal + "todas las apariciones") y deja el audio en disco, para
+    que el play sea instantáneo sin importar la instancia ni el reinicio.
+
+    Cada render usa la misma lógica de producción (caché + manifiesto), así
+    que si ya existía (en disco o nube) no recalcula. Nunca lanza."""
+    try:
+        for s in store.all_songs().values():
+            sid = s["id"]
+            if s.get("status") != "ready":
+                continue
+            try:
+                flat = _flat(s)
+            except Exception:
+                continue
+            if not flat:
+                continue
+            # índices plano por línea
+            by_line = {}
+            for i, (li, _wi, _w) in enumerate(flat):
+                by_line.setdefault(li, []).append(i)
+            for li in sorted(by_line):
+                rng = [by_line[li][0], by_line[li][-1]]
+                for all_occ in (False, True):
+                    try:
+                        app_render_prebuild(sid, rng, all_occ)
+                    except Exception:
+                        pass
+            print(f"pre-render listo: {sid} ({len(by_line)} líneas)", flush=True)
+    except Exception as e:
+        print("pre-render falló: " + str(e)[:200], flush=True)
+
+
+def app_render_prebuild(sid, rng, all_occ):
+    """Wrapper de render() para el pre-render: sin user_id que varie (la clave
+    del render es por CONTENIDO, igual para todos)."""
+    return render(sid, {"ranges": [rng], "user_id": "__pre__",
+                        "all_occurrences": all_occ})
+
+
 @asynccontextmanager
 async def lifespan(app):
     store.init()          # memoria desde disco + GitHub (rápido, sin red en lecturas)
@@ -242,6 +283,11 @@ async def lifespan(app):
             print("audios y envolventes precargados (warm-up)", flush=True)
         except Exception as e:
             print("warm-up de audios falló: " + str(e)[:200], flush=True)
+        # (v29) PRE-RENDER de todas las líneas (con y sin "todas las
+        # apariciones"): al terminar, cada ▶ de línea y cada "Generar" de una
+        # frase = lectura de un archivo local ya existente. El primer play
+        # después de un arranque en frío NO calcula nada: suena al instante.
+        _prebuild_renders()
     threading.Thread(target=_warm, daemon=True).start()
     yield
 
@@ -266,6 +312,13 @@ def _ensure_audio(sid):
     f = AUDIO_DIR / f"{sid}.mp3"
     if (not f.exists() or f.stat().st_size == 0) and media.persistent():
         media.get_file(f"song/{sid}.mp3", str(f))
+        if not f.exists() or f.stat().st_size == 0:
+            # (v29) reintento: GitHub a veces devuelve timeout en la primera
+            # pasada; el audio completo es imprescindible para reproducir.
+            try:
+                media.get_file(f"song/{sid}.mp3", str(f))
+            except Exception:
+                pass
     return f
 
 def _ensure_render(sid, fname):
@@ -429,36 +482,38 @@ def set_selection(sid: str, payload: dict):
     return {"ok": True}
 
 # ---------------------------------------------------------------- render
-def _prune_renders(sid, max_files=60):
-    """Si hay demasiados renders de una canción, borra los más viejos."""
-    files = sorted(RENDER_DIR.glob(f"{sid}_*.mp3"),
-                   key=lambda p: p.stat().st_mtime)
-    for old in files[:-max_files]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
+def _prune_renders(sid, max_files=600):
+    """Poda renders viejos en la NUBE. (v29) ya NO borra archivos locales:
+    el disco del runtime es efímero en Render free y los archivos locales son
+    los que hacen que el play sea instantáneo; el pre-render del arranque
+    genera ~200 por canción, así que el tope sube a 600."""
     if ghstore.enabled():
-        prefix = f"render/{sid}/"
-        names = ghstore.list_dir(prefix)
-        old_names = names[:-max_files * 2]
-        for name in old_names:
-            ghstore.delete_path(prefix + name)
-            if name.endswith(".mp3"):
-                ghstore.delete_path(prefix + name[:-4] + ".json")
-            elif name.endswith(".json"):
-                ghstore.delete_path(prefix + name[:-5] + ".mp3")
+        try:
+            prefix = f"render/{sid}/"
+            names = ghstore.list_dir(prefix)
+            old_names = names[:-max_files * 2]
+            for name in old_names:
+                ghstore.delete_path(prefix + name)
+                if name.endswith(".mp3"):
+                    ghstore.delete_path(prefix + name[:-4] + ".json")
+                elif name.endswith(".json"):
+                    ghstore.delete_path(prefix + name[:-5] + ".mp3")
+        except Exception:
+            pass
     if cloud.cloud_enabled():
-        keys = cloud.list_keys(f"render/{sid}/")
-        for k, _lm in keys[:-max_files * 2]:
-            try:
-                cloud.delete_key(k)
-                if k.endswith(".mp3"):
-                    cloud.delete_key(k[:-4] + ".json")
-                elif k.endswith(".json"):
-                    cloud.delete_key(k[:-5] + ".mp3")
-            except Exception:
-                pass
+        try:
+            keys = cloud.list_keys(f"render/{sid}/")
+            for k, _lm in keys[:-max_files * 2]:
+                try:
+                    cloud.delete_key(k)
+                    if k.endswith(".mp3"):
+                        cloud.delete_key(k[:-4] + ".json")
+                    elif k.endswith(".json"):
+                        cloud.delete_key(k[:-5] + ".mp3")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 def _flat(song):
     flat = []
@@ -1803,13 +1858,23 @@ def occurrences(sid: str, payload: dict):
 
 @app.get("/api/songs/{sid}/render/{fname}")
 def render_file(sid: str, fname: str):
-    if not re.fullmatch(r"[0-9a-f]{8}_[0-9a-f]{8}\.mp3", fname):
+    # (v29) acepta el nombre nuevo por clave determinística (10 hex) y el
+    # formato viejo uid_chash (8_8). El 404 por regex de v28 rompía TODO play.
+    if not re.fullmatch(r"(?:[0-9a-f]{10}|[0-9a-f]{8}_[0-9a-f]{8})\.mp3", fname):
         raise HTTPException(404, "Audio no encontrado")
     f = _ensure_render(sid, fname)
     if not f.exists() or f.stat().st_size == 0:
+        # (v29) reintento: la subida a la nube del POST corre en segundo plano
+        # y puede no haber terminado todavía; el archivo recién creado queda
+        # en disco, pero tras un reinicio hay que bajarlo de la nube.
+        try:
+            media.get_file(f"render/{sid}/{fname}", str(f))
+        except Exception:
+            pass
+    if not f.exists() or f.stat().st_size == 0:
         raise HTTPException(
             404,
-            "El audio se perdió (el servidor se reinició). "
+            "El audio se perdió (el servidor se reinició o se durmió). "
             "Tocá de nuevo \"Generar audio con mis frases\".",
         )
     return FileResponse(str(f), media_type="audio/mpeg",
