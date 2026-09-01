@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v30"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v31"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -1450,6 +1450,10 @@ def render(sid: str, payload: dict):
             work.append((a, b, len(phrases) - 1))
 
     for a, b, phi in work:
+        # (v31) texto REAL de ESTA aparición: sin recalcularlo, todos los
+        # segmentos heredaban el texto del último rango y la lluvia mostraba
+        # siempre la misma frase.
+        ptext = " ".join(w.get("raw", "") for (_, _, w) in flat[a:b + 1]).strip()
         # inicio de la siguiente palabra de la letra (límite duro del corte)
         nxt = flat[b + 1][2]["s"] if b + 1 < total else None
         words = [w for (_, _, w) in flat[a:b + 1]]
