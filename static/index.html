@@ -327,6 +327,7 @@
         <button class="btn danger sm" id="btnClear" onclick="clearSel()" title="Quitar todas las frases pintadas">🗑 Vaciar selección</button>
       </div>
       <label class="check"><input type="checkbox" id="allOcc"> Incluir <b>todas las apariciones</b> de cada frase (ej. coros que se repiten)</label>
+      <p class="note" id="occInfo" style="display:none"></p>
       <p class="saveinfo" id="saveInfo"></p>
       <button class="btn primary" id="btnRender" style="width:100%" onclick="generateRender()">🎬 Generar audio con mis frases</button>
       <div class="renderbox" id="renderBox" style="display:none">
@@ -604,7 +605,33 @@ function pollSong(id){
 async function loadSel(id){
   const j = await api(`/api/songs/${id}/selection?user_id=${encodeURIComponent(state.uid)}`);
   state.sel = (j.ranges || []).map(r => [r[0], r[1]]);
+  updateOccInfo();
 }
+
+/* ---------- conteo de apariciones (al tildar "incluir todas") ---------- */
+async function updateOccInfo(){
+  const el = $('occInfo');
+  if (!el) return;
+  const on = $('allOcc') && $('allOcc').checked;
+  if (!on || !state.song || !state.sel || !state.sel.length){ el.style.display='none'; return; }
+  try{
+    const j = await api(`/api/songs/${state.song.id}/occurrences`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ranges: state.sel })
+    });
+    const occ = (j.occurrences||[]).filter(o => o.count > 1);
+    if (!occ.length){
+      el.textContent = 'Ninguna de tus frases se repite en la letra (solo se incluirá 1 vez).';
+    } else {
+      el.innerHTML = '🔁 ' + occ.map(o => {
+        const t = (o.text||'').trim();
+        return `«${t.length>32 ? t.slice(0,32)+'…' : t}» aparece ${o.count} veces`;
+      }).join(' · ');
+    }
+    el.style.display = '';
+  }catch(e){ el.style.display='none'; }
+}
+$('allOcc') && $('allOcc').addEventListener('change', updateOccInfo);
 
 /* ---------- letra ---------- */
 function flatWords(){
@@ -712,12 +739,12 @@ function toggleWord(i){
   }
   state.sel.sort((p,q)=>p[0]-q[0]);
   state.anchor = i;
-  paint(); scheduleSave();
+  paint(); scheduleSave(); updateOccInfo();
 }
 function replaceRange(a,b){
   state.sel = [[a,b]];
   state.anchor = b;
-  paint(); scheduleSave();
+  paint(); scheduleSave(); updateOccInfo();
 }
 /* Vacía toda la selección de una: limpia el pintado, para la lluvia y
  * guarda el estado vacío en el servidor (reinicia la selección). */
@@ -726,7 +753,7 @@ function clearSel(){
   state.sel = [];
   state.anchor = null;
   stopRain();
-  paint(); updateStats(); scheduleSave();
+  paint(); updateStats(); scheduleSave(); updateOccInfo();
 }
 function extendTo(i){
   if (state.anchor === null) return toggleWord(i);
