@@ -5,6 +5,7 @@ letra con el audio (faster-whisper) y deja "pintar" frases. Cada usuario arma
 su propia selección y genera un audio corto con solo las frases elegidas.
 """
 import hashlib
+import json
 import os
 import queue
 import re
@@ -39,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v27"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v28"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -234,8 +235,11 @@ async def lifespan(app):
         try:
             for s in store.all_songs().values():
                 if s.get("status") == "ready":
-                    _ensure_audio(s["id"])
-            print("audios precargados (warm-up)", flush=True)
+                    f = _ensure_audio(s["id"])
+                    # envolvente en memoria: el primer ▶/Generar no paga la
+                    # decodificación del mp3 completo para medir la voz.
+                    _rms_env(str(f))
+            print("audios y envolventes precargados (warm-up)", flush=True)
         except Exception as e:
             print("warm-up de audios falló: " + str(e)[:200], flush=True)
     threading.Thread(target=_warm, daemon=True).start()
@@ -436,13 +440,23 @@ def _prune_renders(sid, max_files=60):
             pass
     if ghstore.enabled():
         prefix = f"render/{sid}/"
-        for name in ghstore.list_dir(prefix)[:-max_files]:
+        names = ghstore.list_dir(prefix)
+        old_names = names[:-max_files * 2]
+        for name in old_names:
             ghstore.delete_path(prefix + name)
+            if name.endswith(".mp3"):
+                ghstore.delete_path(prefix + name[:-4] + ".json")
+            elif name.endswith(".json"):
+                ghstore.delete_path(prefix + name[:-5] + ".mp3")
     if cloud.cloud_enabled():
         keys = cloud.list_keys(f"render/{sid}/")
-        for key, _lm in keys[:-max_files]:
+        for k, _lm in keys[:-max_files * 2]:
             try:
-                cloud.delete_key(key)
+                cloud.delete_key(k)
+                if k.endswith(".mp3"):
+                    cloud.delete_key(k[:-4] + ".json")
+                elif k.endswith(".json"):
+                    cloud.delete_key(k[:-5] + ".mp3")
             except Exception:
                 pass
 
@@ -921,8 +935,36 @@ def _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src,
         if run_i is not None:
             li0 = flat[run_i][0]
             li1 = flat[min(len(flat) - 1, run_i + len(run) - 1)][0]
-            first_s = float(run[0].get("s")) if run[0].get("s") is not None else None
-            lo_end = float(run[-1].get("e")) if run[-1].get("e") is not None else None
+            # (v27) anclar la voz con los timestamps del TRANSCRIPT (tj) cuando
+            # son coherentes con la línea: el aligner a veces CORRIGE de más la
+            # voz cantada (whisper la oye "tarde") y deja la palabra ~1 s ANTES
+            # de la voz real (p. ej. "Ten piedad" suena en 65.98-68.78 pero
+            # quedó anclada en 65.08-66.86) -> el corte agarraba la música
+            # previa y recortaba la frase. El transcript marca dónde suena la
+            # voz de verdad; si el match (tj) cae fuera de la línea, se
+            # descarta y se usa el timestamp del aligner.
+            _tw = song.get("transcript_words") or []
+
+            def _tj_time(w, key, lo, hi):
+                tj = w.get("tj")
+                if tj is not None and 0 <= tj < len(_tw):
+                    v = float(_tw[tj].get(key))
+                    if lo - 0.30 <= v <= hi + 0.50:
+                        return v
+                return None
+
+            ln0 = lines[li0] if li0 < len(lines) else {}
+            ln1 = lines[li1] if li1 < len(lines) else {}
+            ln_s = (float(ln0["s"]) if ln0.get("s") is not None
+                    else (float(run[0]["s"]) if run[0].get("s") is not None else 0.0))
+            ln_e = (float(ln1["e"]) if ln1.get("e") is not None
+                    else (float(run[-1]["e"]) if run[-1].get("e") is not None else float(dur)))
+            ts0 = _tj_time(run[0], "start", ln_s, ln_e) if run[0].get("s") is not None else None
+            te0 = _tj_time(run[-1], "end", ln_s, ln_e) if run[-1].get("e") is not None else None
+            first_s = (ts0 if ts0 is not None
+                       else (float(run[0]["s"]) if run[0].get("s") is not None else None))
+            lo_end = (te0 if te0 is not None
+                      else (float(run[-1]["e"]) if run[-1].get("e") is not None else None))
 
             if li0 > 0:
                 prev_words = (lines[li0 - 1].get("words") or [])
@@ -1244,6 +1286,22 @@ def _all_occurrences(song, flat, a, b):
 
 _render_cache = {}
 _RENDER_CACHE_MAX = 80
+_song_fp_cache = {}
+
+
+def _song_fingerprint(sid):
+    """Hash del contenido de la canción (letra + transcript + duración),
+    cacheado por proceso. Sirve para que el caché persistente de renders se
+    invalide si la canción se re-alinea."""
+    fp = _song_fp_cache.get(sid)
+    if fp is None:
+        s = store.get_song(sid)
+        blob = repr(s.get("lines") or []) + repr(s.get("transcript_words") or []) + str(s.get("duration"))
+        fp = hashlib.md5(blob.encode("utf-8")).hexdigest()[:10]
+        if len(_song_fp_cache) > 64:
+            _song_fp_cache.clear()
+        _song_fp_cache[sid] = fp
+    return fp
 
 
 @app.post("/api/songs/{sid}/render")
@@ -1267,6 +1325,30 @@ def render(sid: str, payload: dict):
     hit = _render_cache.get(ckey)
     if hit is not None:
         return hit
+
+    # (v27) caché PERSISTENTE: la misma selección = la misma clave determinística
+    # (contenido de la canción + rangos + opción + versión de código). Si ya se
+    # generó antes (en este proceso, en disco o en la nube), se devuelve la
+    # respuesta guardada SIN calcular la envolvente ni recortar audio: el
+    # segundo "Generar"/▶ de la misma frase (incluso de otro usuario o tras un
+    # reinicio del servidor free) es instantáneo.
+    _ranges_key = tuple(sorted((int(x), int(y)) for x, y in ranges if int(x) <= int(y)))
+    key = hashlib.md5(
+        (_song_fingerprint(sid) + repr(_ranges_key) + str(all_occ) + VERSION)
+        .encode("utf-8")).hexdigest()[:10]
+    mpath = RENDER_DIR / f"{sid}_{key}.json"
+    if mpath.exists():
+        try:
+            return json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if media.persistent():
+        try:
+            media.get_file(f"render/{sid}/{key}.json", str(mpath))
+            if mpath.exists() and mpath.stat().st_size > 0:
+                return json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception:
+            pass
 
     flat = _flat(song)
     total = len(flat)
@@ -1641,10 +1723,10 @@ def render(sid: str, payload: dict):
         })
         at += (e0 - s0) + GAP
 
-    uid = hashlib.md5(user_id.encode("utf-8")).hexdigest()[:8]
-    # URL única por contenido: evita que el navegador sirva audio cacheado viejo
-    chash = hashlib.md5(repr(segments).encode("utf-8")).hexdigest()[:8]
-    fname = f"{uid}_{chash}.mp3"
+    # (v27) nombre del audio por CLAVE determinística (compartido entre
+    # usuarios): la misma selección siempre genera el mismo archivo, así el
+    # caché de la nube lo reutiliza.
+    fname = f"{key}.mp3"
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
         au.render_phrases(src, [(s, e) for s, e, _, _ in segments], str(out))
@@ -1661,16 +1743,26 @@ def render(sid: str, payload: dict):
         "phrases": phrases,
         "timeline": timeline,
     }
+    # manifiesto persistente: la respuesta queda guardada junto al audio para
+    # que cualquier regeneración futura la devuelva sin recalcular.
+    try:
+        mpath.write_text(json.dumps(resp), encoding="utf-8")
+    except Exception:
+        pass
     if len(_render_cache) > _RENDER_CACHE_MAX:
         _render_cache.clear()
     _render_cache[ckey] = resp
     return resp
 
 def _upload_render_safe(sid, fname, local_path):
-    """Sube el render a la nube y poda los renders viejos. Nunca lanza."""
+    """Sube el render (mp3 + manifiesto) a la nube y poda los viejos."""
     try:
         if media.persistent():
             media.put_file(f"render/{sid}/{fname}", local_path)
+            mpath = RENDER_DIR / f"{sid}_{fname.replace('.mp3', '.json')}"
+            if mpath.exists():
+                media.put_file(f"render/{sid}/{fname.replace('.mp3', '.json')}",
+                               str(mpath))
             _prune_renders(sid)
     except Exception:
         pass
