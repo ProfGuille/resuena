@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v18"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v19"   # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -578,6 +578,20 @@ def _is_real_anchor(w):
         and w.get("s") is not None and w.get("e") is not None
 
 
+_BREATH_RE = re.compile(r"inhal|exhal|respira", re.I)
+
+
+def _is_breath(w):
+    """¿La palabra del transcript es una respiración (no voz cantada)?
+
+    faster-whisper transcribe los suspiros/respiraciones como "Inhalación" /
+    "Exhalación" o tokens sin texto. No sirven para ubicar dónde canta una
+    frase (alargarían el segmento con aire que no es la frase).
+    """
+    t = (w.get("word") or "").strip()
+    return (not t) or bool(_BREATH_RE.search(t)) or t in ("♪", "♫", "…", "...")
+
+
 @app.post("/api/songs/{sid}/render")
 def render(sid: str, payload: dict):
     song = store.get_song(sid)
@@ -612,8 +626,9 @@ def render(sid: str, payload: dict):
         # inicio de la siguiente palabra de la letra (límite duro del corte)
         nxt = flat[b + 1][2]["s"] if b + 1 < total else None
         words = [w for (_, _, w) in flat[a:b + 1]]
+        ptext = " ".join(w.get("raw", "") for w in words).strip()
         phrases.append({
-            "text": " ".join(w.get("raw", "") for w in words).strip(),
+            "text": ptext,
             "ok": True,
         })
         omitted_words += sum(1 for w in words if not w.get("m"))
@@ -654,26 +669,40 @@ def render(sid: str, payload: dict):
                 gap_s = float(pv["e"])
                 gap_e = float(nx["s"])
                 gap_dur = gap_e - gap_s
-                # sel == gap_words: la selección es TODO el hueco (caso típico
-                # de elegir una línea completa sin audio). Solo se acepta si el
-                # hueco no es enorme: un hueco grande casi siempre mezcla
-                # instrumental/otras frases, y dar el hueco entero sonaría a
-                # otra cosa.
-                whole_gap = sel_words >= gap_words
-                if (gap_words >= 1 and sel_words >= 1
-                        and (sel_words < gap_words
-                             or (whole_gap and gap_dur <= 20.0))
-                        and 0.2 < gap_dur <= 60
-                        and gap_dur / gap_words <= 6.0):
-                    off0 = a - prev_i - 1
-                    off1 = b - prev_i
-                    s0 = max(0.0, gap_s + (off0 / gap_words) * gap_dur)
-                    e0 = min(dur, gap_s + (off1 / gap_words) * gap_dur)
-                    if e0 - s0 > 0.05:
-                        pos_seg = (s0, e0)
+                if 0.2 < gap_dur <= 60:
+                    # palabras REALES del transcript dentro del hueco: marcan
+                    # dónde canta la frase de verdad. Repartir el hueco
+                    # proporcionalmente metía aire muerto al inicio (p. ej.
+                    # 2.8 s de instrumental antes del "Ten piedad") o se
+                    # pasaba de largo sobre la frase siguiente.
+                    in_gap = [w for w in transcript
+                              if gap_s + 0.05 < float(w.get("start") or 0) < gap_e - 0.05
+                              and not _is_breath(w)]
+                    if in_gap:
+                        s0 = max(gap_s + 0.05, float(in_gap[0]["start"]) - 0.12)
+                        e0 = min(gap_e - 0.05, float(in_gap[-1]["end"]) + 0.22)
+                        if e0 - s0 > 0.05:
+                            pos_seg = (s0, e0)
+                    else:
+                        # hueco sin palabras (p. ej. un melisma sin letra):
+                        # el hueco completo ES la frase, si no es enorme.
+                        whole_gap = sel_words >= gap_words
+                        if (gap_words >= 1 and sel_words >= 1
+                                and (sel_words < gap_words
+                                     or (whole_gap and gap_dur <= 20.0))
+                                and gap_dur / gap_words <= 6.0):
+                            off0 = a - prev_i - 1
+                            off1 = b - prev_i
+                            inner_s = gap_s + 0.05
+                            inner_e = gap_e - 0.05
+                            inner_dur = inner_e - inner_s
+                            s0 = max(0.0, inner_s + (off0 / gap_words) * inner_dur)
+                            e0 = min(dur, inner_s + (off1 / gap_words) * inner_dur)
+                            if e0 - s0 > 0.05:
+                                pos_seg = (s0, e0)
         if not runs:
             if pos_seg:
-                segments.append(pos_seg)
+                segments.append((pos_seg[0], pos_seg[1], ptext))
                 continue
             # respaldo GENERAL (SOLO si el posicional no aplicó): la frase no
             # tiene audio en su posición ni vecinos confiables, pero puede
@@ -690,7 +719,7 @@ def render(sid: str, payload: dict):
                 s0 = max(0.0, transcript[k0]["start"] - pb0)
                 e0 = min(dur, transcript[k1]["end"] + pb1)
                 if e0 - s0 > 0.05:
-                    segments.append((s0, e0))
+                    segments.append((s0, e0, ptext))
                     continue
             if phrases:
                 phrases[-1]["ok"] = False
@@ -704,14 +733,14 @@ def render(sid: str, payload: dict):
                     s0 = max(0.0, run[0]["s"] - 0.15)
                     e0 = min(dur, run[-1]["e"] + 0.25)
                     if e0 - s0 > 0.05:
-                        segments.append((s0, e0))
+                        segments.append((s0, e0, ptext))
                     continue
                 j0, j1 = min(tjs), max(tjs)
                 for k0, k1, _ in align.find_occurrences(transcript, j0, j1):
                     s0 = max(0.0, transcript[k0]["start"] - 0.15)
                     e0 = min(dur, transcript[k1]["end"] + 0.25)
                     if e0 - s0 > 0.05:
-                        segments.append((s0, e0))
+                        segments.append((s0, e0, ptext))
             else:
                 # robustez: si los timestamps del tramo son inverosímiles
                 # (huecos enormes entre palabras contiguas -> el align unió la
@@ -806,7 +835,13 @@ def render(sid: str, payload: dict):
                         cap = float(last_real["e"]) + n_soft * 0.85 + 0.5
                         e0 = min(max(e0, float(region[-1]["end"]) + 0.15), cap)
                     if next_anchor_s is not None:
-                        e0 = min(e0, next_anchor_s - 0.05)
+                        # el tope NUNCA corta dentro de la última palabra real:
+                        # cuando las líneas son contiguas (la frase siguiente
+                        # empieza justo donde termina esta), next_anchor_s ≈
+                        # last_real.e y el tope viejo cortaba el final de la
+                        # palabra ("...ladrone[s]" se oía recortado).
+                        e0 = min(e0, max(next_anchor_s - 0.05,
+                                         float(last_real["e"]) + 0.05))
                     e0 = min(float(dur), e0)
                 else:
                     # toda la run está interpolada (sin anclas reales): su
@@ -821,7 +856,22 @@ def render(sid: str, payload: dict):
                         if run[-1].get("sim", 1.0) <= 0.55 or run[-1].get("tj") is None:
                             e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
                 if e0 - s0 > 0.05:
-                    segments.append((s0, e0))
+                    segments.append((s0, e0, ptext))
+
+    # sin solapamientos: si dos frases pedidas comparten audio (el final de
+    # una con el inicio de la otra), se corría dos veces el mismo pedazo y la
+    # costura sonaba a corte. Cada segmento empieza donde terminó el anterior
+    # (por orden de tiempo). El orden final de reproducción lo decide la
+    # selección del usuario.
+    if len(segments) > 1:
+        segments.sort(key=lambda s: s[0])
+        clipped = []
+        for s0, e0, txt in segments:
+            if clipped and s0 < clipped[-1][1]:
+                s0 = clipped[-1][1]
+            if e0 - s0 > 0.05:
+                clipped.append((s0, e0, txt))
+        segments = clipped
 
     if skipped and not segments:
         raise HTTPException(
@@ -834,7 +884,7 @@ def render(sid: str, payload: dict):
     merged = []
     for seg in segments:
         if merged and seg[0] < merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], seg[1]))
+            merged[-1] = (merged[-1][0], max(merged[-1][1], seg[1]), merged[-1][2])
         else:
             merged.append(seg)
     segments = merged
@@ -842,13 +892,30 @@ def render(sid: str, payload: dict):
     if not segments:
         raise HTTPException(400, "No se pudo generar audio con las frases elegidas")
 
+    # línea de tiempo para la lluvia: cada segmento con su texto y su posición
+    # DENTRO del audio combinado (los fragmentos se concatenan con 0.2 s de
+    # silencio). Sirve para que la lluvia muestre la frase que suena en el
+    # momento exacto en que suena.
+    GAP = 0.2
+    timeline = []
+    at = 0.0
+    for s0, e0, txt in segments:
+        timeline.append({
+            "start": round(s0, 2),
+            "end": round(e0, 2),
+            "dur": round(e0 - s0, 2),
+            "at": round(at, 2),
+            "text": txt,
+        })
+        at += (e0 - s0) + GAP
+
     uid = hashlib.md5(user_id.encode("utf-8")).hexdigest()[:8]
     # URL única por contenido: evita que el navegador sirva audio cacheado viejo
     chash = hashlib.md5(repr(segments).encode("utf-8")).hexdigest()[:8]
     fname = f"{uid}_{chash}.mp3"
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
-        au.render_phrases(src, segments, str(out))
+        au.render_phrases(src, [(s, e) for s, e, _ in segments], str(out))
         # subir a la nube en segundo plano: el GET sirve desde disco y no
         # bloquea el POST (GitHub puede tardar segundos con archivos grandes)
         threading.Thread(target=_upload_render_safe,
@@ -860,6 +927,7 @@ def render(sid: str, payload: dict):
         "skipped": skipped,
         "omitted": omitted_words,
         "phrases": phrases,
+        "timeline": timeline,
     }
 
 
