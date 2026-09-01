@@ -406,6 +406,8 @@ const state = {
   anchor: null,     // última palabra tocada (para shift-click)
   mode: 'full',     // 'full' | 'sel'
   selUrl: null,
+  timeline: null,   // línea de tiempo del render: [{at,dur,text}] para la lluvia
+  rainOn: false,    // lluvia SOLO al reproducir el audio generado con las frases
   timer: null,
   uid: (localStorage.getItem('lm_uid') || (localStorage.setItem('lm_uid', Math.random().toString(36).slice(2,10)), localStorage.getItem('lm_uid'))),
   dirty: false,
@@ -425,6 +427,8 @@ function newUser(){
   state.sel = [];
   state.anchor = null;
   state.selUrl = null;
+  state.timeline = null;
+  state.rainOn = false;
   stopRain();
   $('userPill').textContent = '👤 usuario ' + state.uid;
   if (state.song){
@@ -523,7 +527,8 @@ function renderLibrary(){
 async function openSong(id){
   showEditor();
   dragStart = null; state.dragMoved = false; state.dragPreview = null;
-  state.song = null; state.sel = []; state.selUrl = null; state.mode = 'full';
+  state.song = null; state.sel = []; state.selUrl = null; state.timeline = null;
+  state.rainOn = false; state.mode = 'full';
   $('lyricsBox').innerHTML = '<p class="hint">Cargando…</p>';
   $('playerBox').style.display = 'none';
   $('procBanner').classList.remove('show');
@@ -606,6 +611,7 @@ function flatWords(){
 
 /* ---------- lluvia de frases ---------- */
 let _rainTimer = null;
+let _lastActiveRain = null;   // última frase activa que ya se soltó en la lluvia
 function rainPhrases(){
   if (!state.song || !state.sel || !state.sel.length) return [];
   const flat = flatWords();
@@ -616,10 +622,26 @@ function rainPhrases(){
   }
   return frases;
 }
-function spawnRainDrop(phrases){
+/* La frase que SUENA en este instante, según la línea de tiempo del render.
+ * El audio combinado concatena los fragmentos (con 0.2 s de silencio entre
+ * ellos); 'at' es la posición de cada frase dentro de ese audio. */
+function rainActivePhrase(){
+  const tl = state.timeline;
+  if (!tl || !tl.length || !selAudio) return null;
+  const t = selAudio.currentTime || 0;
+  for (const e of tl){
+    if (t >= e.at && t < e.at + e.dur) return e.text;
+  }
+  return null;
+}
+function spawnRainDrop(phrases, forcedText){
   const ov = $('rainOverlay');
   if (!ov || !phrases.length) return;
-  const fr = phrases[Math.floor(Math.random() * phrases.length)];
+  // la frase que está sonando aparece en su momento; las demás pueden sumarse
+  const active = forcedText || rainActivePhrase();
+  const fr = (active && Math.random() < 0.75)
+    ? active
+    : phrases[Math.floor(Math.random() * phrases.length)];
   const d = document.createElement('div');
   d.className = 'raindrop';
   d.textContent = fr;
@@ -627,13 +649,14 @@ function spawnRainDrop(phrases){
   const fs = Math.max(15, Math.min(40, 32 - fr.length * 0.35)) * (0.85 + Math.random() * 0.3);
   d.style.fontSize = Math.round(fs) + 'px';
   d.style.setProperty('--rot', (Math.random() * 40 - 20) + 'deg');
-  // carriles: 6 columnas para que las gotas no se tapen tanto entre sí
-  const LANES = 6, laneW = 100 / LANES;
+  // carriles: 9 columnas para que las gotas no se tapen entre sí
+  const LANES = 9, laneW = 100 / LANES;
   const lane = Math.floor(Math.random() * LANES);
   d.style.left = (lane * laneW + Math.random() * laneW * 0.7) + 'vw';
-  const dur = 3.5 + Math.random() * 4.5;                     // 3.5-8 s de caída
+  // caída lenta y escalonada (7-13 s): menos velocidad y menos amontonamiento
+  const dur = 7 + Math.random() * 6;
   d.style.animationDuration = dur + 's';
-  d.style.animationDelay = (-(Math.random() * dur * 0.6)).toFixed(2) + 's';  // arranques escalonados
+  d.style.animationDelay = (-(Math.random() * dur * 0.5)).toFixed(2) + 's';
   ov.appendChild(d);
   // nunca salirse de la pantalla: ajustar si la frase es ancha
   const w = d.offsetWidth;
@@ -649,14 +672,16 @@ function startRain(){
   if (!ov) return;
   ov.classList.add('on');
   if (_rainTimer) clearInterval(_rainTimer);
-  for (let i = 0; i < 6; i++) spawnRainDrop(phrases);       // lote inicial
+  _lastActiveRain = rainActivePhrase();
+  for (let i = 0; i < 4; i++) spawnRainDrop(phrases);      // lote inicial suave
   _rainTimer = setInterval(() => {
     spawnRainDrop(phrases);
-    if (Math.random() < 0.5) spawnRainDrop(phrases);        // a veces dos, con aire
-  }, 1200);
+    if (Math.random() < 0.25) spawnRainDrop(phrases);      // a veces dos, con aire
+  }, 2400);
 }
 function stopRain(){
   if (_rainTimer){ clearInterval(_rainTimer); _rainTimer = null; }
+  _lastActiveRain = null;
   const ov = $('rainOverlay');
   if (!ov) return;
   ov.classList.remove('on');
@@ -939,7 +964,9 @@ function setupSelAudio(){
     fullAudio.pause();
     $('btnSelPlay').textContent = '⏸ Pausar';
     if (state.mode==='sel') $('btnPlay').textContent = '⏸';
-    startRain();
+    // la lluvia solo aparece al reproducir el audio GENERADO con las frases
+    // (no al escuchar una línea suelta con el ▶ de la letra)
+    if (state.rainOn) startRain();
   });
   selAudio.addEventListener('pause', () => {
     $('btnSelPlay').textContent = '▶ Escuchar';
@@ -950,6 +977,15 @@ function setupSelAudio(){
     if (state.mode !== 'sel') return;
     if (selAudio.duration) $('seekBar').value = selAudio.currentTime / selAudio.duration * 100;
     $('curTime').textContent = fmt(selAudio.currentTime);
+    // al cambiar de frase en la reproducción, soltarla en la lluvia en ese
+    // mismo instante (además de las que caen al azar)
+    if (state.rainOn && _rainTimer){
+      const act = rainActivePhrase();
+      if (act && act !== _lastActiveRain){
+        _lastActiveRain = act;
+        spawnRainDrop(rainPhrases(), act);
+      }
+    }
   });
   selAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(selAudio.duration); });
   selAudio.addEventListener('error', () => {
@@ -1008,6 +1044,8 @@ async function previewLine(li){
     // URL única por contenido: fuerza al navegador a pedir el audio nuevo
     selAudio.src = j.url + '?v=' + Date.now();
     state.selUrl = j.url;
+    state.timeline = j.timeline || null;
+    state.rainOn = false;   // línea suelta: sin lluvia
     setMode('sel');
     selAudio.load();
     selAudio.play().catch(()=>{});
@@ -1031,6 +1069,8 @@ async function generateRender(){
     const u = j.url + '?v=' + Date.now();
     selAudio.src = u;
     state.selUrl = j.url;
+    state.timeline = j.timeline || null;
+    state.rainOn = true;    // audio generado con las frases: la lluvia puede salir
     $('dlLink').href = u;
     // nota con las frases REALMENTE incluidas (visibles = nada se cuela)
     const inc = (j.phrases||[]).filter(p => p.ok).map(p => p.text).filter(Boolean);
