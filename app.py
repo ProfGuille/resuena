@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v25"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v26"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -1108,6 +1108,69 @@ def _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src,
     except Exception:
         return s0, e0
 
+
+# --------------------------------------------------------------------------
+# (v26) Repeticiones por LETRA: las apariciones de una frase se buscan en las
+# líneas repetidas de la letra (que ya tienen posición alineada), no en el
+# transcript de whisper. Similitud de texto con palabras distintivas:
+#   - ratio >= 0.85 -> repetición (p. ej. "ten piedad ten piedad" vs
+#     "ten piedad señor ten piedad");
+#   - ratio >= 0.70 Y comparten una palabra distintiva (no común) ->
+#     repetición ("ten piedad ten piedad" vs "ten piedad" x3: comparten
+#     "piedad"). Se rechazan las frases parecidas que NO se repiten:
+#     "no nos aman" vs "no sabemos amar" (0.84 pero sin distintiva común),
+#     "tristezas" vs "anhelos", "paso estoy contigo" vs "paso que das".
+# --------------------------------------------------------------------------
+_COMUNES_REP = {"por", "los", "las", "que", "la", "el", "de", "del", "a",
+                "en", "y", "o", "un", "una", "con", "se", "su", "sus", "no",
+                "lo", "al", "te", "mi", "tu", "es", "mas", "ya", "me", "le",
+                "nos", "les", "to", "do", "pa", "en"}
+
+
+def _norm_lyr(t):
+    return align.norm(str(t))
+
+
+def _distintivas(t):
+    return {w for w in _norm_lyr(t).split()
+            if len(w) >= 4 and w not in _COMUNES_REP}
+
+
+def _lineas_repetidas(a, b):
+    """¿Las dos líneas son la misma frase repetida?"""
+    r = align.fuzz.ratio(_norm_lyr(a), _norm_lyr(b)) / 100.0
+    if r >= 0.85:
+        return True
+    if r >= 0.70:
+        return bool(_distintivas(a) & _distintivas(b))
+    return False
+
+
+def _repeated_line_ranges(song, flat, a, b):
+    """Rangos (en el flat) de todas las líneas de la letra que repiten el
+    texto de la selección [a..b]. Incluye la propia línea (aparición
+    primaria)."""
+    lines = song.get("lines") or []
+    if not lines:
+        return [(a, b)]
+    li0 = flat[a][0]
+    li1 = flat[b][0]
+    q = " ".join(w.get("raw", "") for li in range(li0, li1 + 1)
+                 for w in (lines[li].get("words") or []))
+    if not q.strip():
+        return [(a, b)]
+    out = []
+    for li, line in enumerate(lines):
+        t = " ".join(w.get("raw", "") for w in (line.get("words") or []))
+        if not t.strip():
+            continue
+        if _lineas_repetidas(q, t):
+            idxs = [i for i, (l, _, _) in enumerate(flat) if l == li]
+            if idxs:
+                out.append((idxs[0], idxs[-1]))
+    out.sort(key=lambda x: x[0])
+    return out if out else [(a, b)]
+
 @app.post("/api/songs/{sid}/render")
 def render(sid: str, payload: dict):
     song = store.get_song(sid)
@@ -1133,22 +1196,38 @@ def render(sid: str, payload: dict):
     segments = []
     skipped = 0
     omitted_words = 0
-    phrases = []          # texto de cada rango pedido + si aportó audio
+    # (v26) "todas las apariciones" se resuelve ANTES del loop: las
+    # repeticiones se buscan en la LETRA (líneas con texto igual o muy
+    # parecido, que ya tienen posición alineada en el audio), NO en el
+    # transcript de whisper (que transcribe mal la voz cantada y producía
+    # audio de OTRAS frases: "naciones" -> "tentación", "tristezas" ->
+    # "anhelos", "paso estoy" -> "paso que das"...). Cada frase pedida se
+    # expande a sus apariciones; `phrases` queda con UNA entrada por frase
+    # pedida y su conteo real.
+    work = []             # (a, b, índice en phrases)
+    phrases = []
     for a, b in ranges:
         a = max(0, int(a))
         b = min(total - 1, int(b))
         if a > b:
             continue
+        words0 = [w for (_, _, w) in flat[a:b + 1]]
+        ptext = " ".join(w.get("raw", "") for w in words0).strip()
+        omitted_words += sum(1 for w in words0 if not w.get("m"))
+        if all_occ:
+            subs = _repeated_line_ranges(song, flat, a, b)
+            phrases.append({"text": ptext, "ok": True,
+                            "repeticiones": len(subs)})
+            for (aa, bb) in subs:
+                work.append((aa, bb, len(phrases) - 1))
+        else:
+            phrases.append({"text": ptext, "ok": True, "repeticiones": 1})
+            work.append((a, b, len(phrases) - 1))
+
+    for a, b, phi in work:
         # inicio de la siguiente palabra de la letra (límite duro del corte)
         nxt = flat[b + 1][2]["s"] if b + 1 < total else None
         words = [w for (_, _, w) in flat[a:b + 1]]
-        ptext = " ".join(w.get("raw", "") for w in words).strip()
-        phrases.append({
-            "text": ptext,
-            "ok": True,
-            "repeticiones": 1,
-        })
-        omitted_words += sum(1 for w in words if not w.get("m"))
         # dividir la selección en tramos contiguos de palabras CON audio;
         # los huecos sin audio detectado se saltean (no invaden el audio final)
         runs = []          # (índice plano de la 1ª palabra, palabras del tramo)
@@ -1241,121 +1320,31 @@ def render(sid: str, payload: dict):
                 if e0 - s0 > 0.05:
                     segments.append((s0, e0, ptext))
                     continue
-            if phrases:
-                phrases[-1]["ok"] = False
+            phrases[phi]["ok"] = False
             skipped += 1
             continue
 
         for run_i, run in runs:
-            if all_occ:
-                # (v24) TODAS las apariciones de la frase, buscadas por TEXTO
-                # en el transcript (no por tj: los tj de líneas restauradas o
-                # alineadas con otro transcript apuntaban a índices equivocados
-                # y no se incluía ninguna repetición). Cada aparición usa las
-                # fronteras de voz de SU propia posición (overrides), no las
-                # de la línea lírica.
-                # (v24) la búsqueda por texto vive en align.py: si el archivo
-                # desplegado es viejo (deploy parcial sin align.py), no
-                # romper con 500: degradar al camino por tj de antes.
-                occs_fn = getattr(align, "find_all_phrase_occurrences", None)
-                if occs_fn is None:
-                    tjs_old = [w.get("tj") for w in run if w.get("tj") is not None]
-                    if tjs_old:
-                        j0o, j1o = min(tjs_old), max(tjs_old)
-                        for k0o, k1o, _ in align.find_occurrences(transcript, j0o, j1o):
-                            s0o = max(0.0, transcript[k0o]["start"] - 0.15)
-                            e0o = min(dur, transcript[k1o]["end"] + 0.25)
-                            s0o, e0o = _apply_voice_boundaries(
-                                song, flat, run, run_i, s0o, e0o, dur, src)
-                            if e0o - s0o > 0.05:
-                                segments.append((s0o, e0o, ptext))
-                        continue
-                    s0 = max(0.0, run[0]["s"] - 0.15)
-                    e0 = min(dur, run[-1]["e"] + 0.25)
-                    s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
-                    if e0 - s0 > 0.05:
-                        segments.append((s0, e0, ptext))
-                    continue
-                occs = occs_fn(transcript, run)
-                # (v25) la posición PRIMARIA (la frase que elegiste, anclada
-                # por el align a su lugar en la canción) SIEMPRE va: es la
-                # que el usuario pidió. Las repeticiones encontradas por
-                # texto se suman DESPUÉS, sin duplicar la primaria.
-                s_prim = max(0.0, run[0]["s"] - 0.15)
-                e_prim = min(dur, run[-1]["e"] + 0.25)
-                s_prim, e_prim = _apply_voice_boundaries(
-                    song, flat, run, run_i, s_prim, e_prim, dur, src)
-                if e_prim - s_prim > 0.05:
-                    segments.append((s_prim, e_prim, ptext))
-                env = _rms_env(src)
-                usadas = [(s_prim, e_prim)]
-                n_rep = 0
-                for k0, k1, _ in occs:
-                    fs_occ = float(transcript[k0]["start"])
-                    le_occ = float(transcript[k1]["end"])
-                    prev_e = (float(transcript[k0 - 1]["end"])
-                              if k0 > 0 else None)
-                    nxt_s = (float(transcript[k1 + 1]["start"])
-                             if k1 + 1 < len(transcript) else None)
-                    s0 = max(0.0, fs_occ - 0.25)
-                    e0 = min(dur, le_occ + 0.20)
-                    # whisper a veces pone el inicio de la palabra TARDE en la
-                    # voz cantada ("tempiedad" = "ten piedad" con el "Ten"
-                    # ~1.2 s antes): si hay un ataque fuerte y claro ANTES del
-                    # timestamp (desde el final de la palabra previa del
-                    # transcript) y arranca desde silencio real, ese ataque
-                    # ES el arranque de la frase.
-                    if prev_e is not None:
-                        st = _strong_onset(env, prev_e - 0.02,
-                                           fs_occ + 0.60, 0.045)
-                        if (st is not None
-                                and fs_occ - 1.50 <= st < fs_occ - 0.30):
-                            k_st = max(1, _idx(st))
-                            base0 = float(
-                                env[max(0, k_st - 20):k_st].min())
-                            if base0 < 0.06:
-                                s0 = st
-                    s0, e0 = _apply_voice_boundaries(
-                        song, flat, run, run_i, s0, e0, dur, src,
-                        first_s_ov=fs_occ, lo_end_ov=le_occ,
-                        prev_end_ov=prev_e, next_first_s_ov=nxt_s,
-                        occ_mode=True)
-                    if e0 - s0 > 0.05:
-                        # no duplicar la primaria ni otra repetición ya usada
-                        # (solape directo: dos intervalos que comparten audio
-                        # son la misma aparición)
-                        if any(s0 < ue - 0.02 and us < e0 - 0.02
-                               for us, ue in usadas):
-                            continue
-                        usadas.append((s0, e0))
-                        segments.append((s0, e0, ptext))
-                        n_rep += 1
-                if phrases:
-                    # repeticiones = número REAL de fragmentos (primaria +
-                    # las que sumó el matcher)
-                    phrases[-1]["repeticiones"] = max(
-                        phrases[-1].get("repeticiones", 1), 1 + n_rep)
-            else:
-                # robustez: si los timestamps del tramo son inverosímiles
-                # (huecos enormes entre palabras contiguas -> el align unió la
-                # frase con audio de otra sección), dividir en los huecos y
-                # quedarse con el sub-tramo más denso en vez de emitir un
-                # segmento gigante con audio de otras frases.
-                if len(run) > 1:
-                    subs = []
-                    cur = [run[0]]
-                    for k in range(1, len(run)):
-                        if run[k]["s"] - run[k - 1]["e"] > 2.5:
-                            subs.append(cur)
-                            cur = [run[k]]
-                        else:
-                            cur.append(run[k])
-                    subs.append(cur)
-                    dense = max(subs, key=lambda s: len(s))
-                    if len(dense) >= 2:
-                        run = dense
+            # robustez: si los timestamps del tramo son inverosímiles
+            # (huecos enormes entre palabras contiguas -> el align unió la
+            # frase con audio de otra sección), dividir en los huecos y
+            # quedarse con el sub-tramo más denso en vez de emitir un
+            # segmento gigante con audio de otras frases.
+            if len(run) > 1:
+                subs = []
+                cur = [run[0]]
+                for k in range(1, len(run)):
+                    if run[k]["s"] - run[k - 1]["e"] > 2.5:
+                        subs.append(cur)
+                        cur = [run[k]]
                     else:
-                        run = max(subs, key=lambda s: (s[-1]["e"] - s[0]["s"]))
+                        cur.append(run[k])
+                subs.append(cur)
+                dense = max(subs, key=lambda s: len(s))
+                if len(dense) >= 2:
+                    run = dense
+                else:
+                    run = max(subs, key=lambda s: (s[-1]["e"] - s[0]["s"]))
                 n = len(run)
                 if n <= 2:
                     # selección corta (una/dos palabras): cortar EXACTO,
@@ -1551,6 +1540,43 @@ def _upload_render_safe(sid, fname, local_path):
             _prune_renders(sid)
     except Exception:
         pass
+
+
+@app.post("/api/songs/{sid}/occurrences")
+def occurrences(sid: str, payload: dict):
+    """Cuenta cuántas veces aparece cada frase seleccionada en la letra (y
+    sus posiciones). Es rápido (no renderiza audio): sirve para mostrar
+    "🔁 esta frase se repite N veces" al tildar "Incluir todas las
+    apariciones"."""
+    song = store.get_song(sid)
+    if not song:
+        raise HTTPException(404, "Canción no encontrada")
+    ranges = payload.get("ranges") or []
+    flat = _flat(song)
+    total = len(flat)
+    if total == 0:
+        raise HTTPException(400, "La letra está vacía")
+    out = []
+    for a, b in ranges:
+        a = max(0, int(a))
+        b = min(total - 1, int(b))
+        if a > b:
+            continue
+        subs = _repeated_line_ranges(song, flat, a, b)
+        li0 = flat[a][0]
+        lines = song.get("lines") or []
+        txt = " ".join(w.get("raw", "") for w in
+                       ((lines[li0].get("words") or []) if li0 < len(lines) else []))
+        times = []
+        for (a2, b2) in subs:
+            w0 = flat[a2][2]
+            w1 = flat[b2][2]
+            s = w0.get("s")
+            e = w1.get("e")
+            if s is not None and e is not None:
+                times.append([round(float(s), 2), round(float(e), 2)])
+        out.append({"text": txt, "count": len(subs), "times": times})
+    return {"occurrences": out}
 
 @app.get("/api/songs/{sid}/render/{fname}")
 def render_file(sid: str, fname: str):
