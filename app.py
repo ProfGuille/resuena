@@ -39,7 +39,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v26"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v27"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -228,6 +228,16 @@ async def lifespan(app):
             print("modelo Whisper listo (warm-up)", flush=True)
         except Exception as e:
             print("warm-up del modelo falló: " + str(e)[:200], flush=True)
+        # (v27) precargar en segundo plano los mp3 ya conocidos: el primer
+        # "Generar"/play después de un deploy no espera la descarga desde
+        # GitHub (que en el plan free puede tardar varios segundos).
+        try:
+            for s in store.all_songs().values():
+                if s.get("status") == "ready":
+                    _ensure_audio(s["id"])
+            print("audios precargados (warm-up)", flush=True)
+        except Exception as e:
+            print("warm-up de audios falló: " + str(e)[:200], flush=True)
     threading.Thread(target=_warm, daemon=True).start()
     yield
 
@@ -1171,6 +1181,71 @@ def _repeated_line_ranges(song, flat, a, b):
     out.sort(key=lambda x: x[0])
     return out if out else [(a, b)]
 
+
+def _all_occurrences(song, flat, a, b):
+    """TODAS las apariciones de la frase seleccionada [a..b] en la letra, como
+    rangos de palabras (indices del flat). Conteo REAL, no por lineas:
+
+      1) apariciones EXACTAS de la secuencia de palabras (normalizadas) en
+         toda la letra. Cada una hace sonar la frase una vez: una linea que
+         dice "Ten piedad, Ten piedad" cuenta 2, no 1. Esto es lo que hace que
+         el recuento coincida con lo que despues se reproduce.
+      2) si una LINEA repite la frase por similitud (regla validada) pero no
+         contiene la frase exacta (p. ej. "Ten piedad, Senor, Ten piedad" vs
+         "Ten piedad, ten piedad"), se agrega una vez esa linea entera.
+
+    Nunca matchea por transcript: el texto de la letra es la verdad."""
+    ph = [align.norm(w.get("raw", "")) for (_, _, w) in flat[a:b + 1]]
+    ph = [w for w in ph if w]
+    n = len(flat)
+    L = len(ph)
+    if not ph:
+        return [(a, b)]
+    allw = [align.norm(w.get("raw", "")) for (_, _, w) in flat]
+    # buscar DENTRO de cada línea (el salto de línea es una frontera real: no
+    # se cuentan "apariciones" que cruzan de una línea a la siguiente solo
+    # porque el texto continúa con las mismas palabras)
+    occs = []
+    i = 0
+    while i < n:
+        j = i
+        while j < n and flat[j][0] == flat[i][0]:
+            j += 1
+        k = i
+        while k + L <= j:
+            if allw[k:k + L] == ph:
+                occs.append((k, k + L - 1))
+                k += L      # apariciones contiguas no se solapan
+            else:
+                k += 1
+        i = j
+    if not occs:
+        return _repeated_line_ranges(song, flat, a, b)
+    # lineas que ya cubren las apariciones exactas (para no duplicar)
+    covered = set()
+    for (s, e) in occs:
+        for li in range(flat[s][0], flat[e][0] + 1):
+            covered.add(li)
+    extra = []
+    q = " ".join(w.get("raw", "") for (_, _, w) in flat[a:b + 1])
+    lines = song.get("lines") or []
+    for li, line in enumerate(lines):
+        if li in covered:
+            continue
+        t = " ".join(w.get("raw", "") for w in (line.get("words") or []))
+        if t.strip() and _lineas_repetidas(q, t):
+            idxs = [k for k, (l, _, _) in enumerate(flat) if l == li]
+            if idxs:
+                extra.append((idxs[0], idxs[-1]))
+    occs = occs + extra
+    occs.sort(key=lambda x: x[0])
+    return occs
+
+
+_render_cache = {}
+_RENDER_CACHE_MAX = 80
+
+
 @app.post("/api/songs/{sid}/render")
 def render(sid: str, payload: dict):
     song = store.get_song(sid)
@@ -1184,6 +1259,14 @@ def render(sid: str, payload: dict):
     all_occ = bool(payload.get("all_occurrences", False))
     if not ranges:
         raise HTTPException(400, "No hay frases seleccionadas")
+    # (v27) caché en memoria de renders idénticos: el botón "Generar audio" y
+    # los ▶ de línea responden al instante si se pide lo mismo de nuevo (lo
+    # más común: re-generar tras tocar play/pausa). El audio además ya está
+    # en disco/URL, así que no se recorta nada dos veces.
+    ckey = (sid, user_id, tuple(tuple(int(x) for x in r) for r in ranges), all_occ)
+    hit = _render_cache.get(ckey)
+    if hit is not None:
+        return hit
 
     flat = _flat(song)
     total = len(flat)
@@ -1215,7 +1298,7 @@ def render(sid: str, payload: dict):
         ptext = " ".join(w.get("raw", "") for w in words0).strip()
         omitted_words += sum(1 for w in words0 if not w.get("m"))
         if all_occ:
-            subs = _repeated_line_ranges(song, flat, a, b)
+            subs = _all_occurrences(song, flat, a, b)
             phrases.append({"text": ptext, "ok": True,
                             "repeticiones": len(subs)})
             for (aa, bb) in subs:
@@ -1301,7 +1384,7 @@ def render(sid: str, payload: dict):
                                 pos_seg = (s0, e0)
         if not runs:
             if pos_seg:
-                segments.append((pos_seg[0], pos_seg[1], ptext))
+                segments.append((pos_seg[0], pos_seg[1], ptext, phi))
                 continue
             # respaldo GENERAL (SOLO si el posicional no aplicó): la frase no
             # tiene audio en su posición ni vecinos confiables, pero puede
@@ -1318,7 +1401,7 @@ def render(sid: str, payload: dict):
                 s0 = max(0.0, transcript[k0]["start"] - pb0)
                 e0 = min(dur, transcript[k1]["end"] + pb1)
                 if e0 - s0 > 0.05:
-                    segments.append((s0, e0, ptext))
+                    segments.append((s0, e0, ptext, phi))
                     continue
             phrases[phi]["ok"] = False
             skipped += 1
@@ -1345,121 +1428,167 @@ def render(sid: str, payload: dict):
                     run = dense
                 else:
                     run = max(subs, key=lambda s: (s[-1]["e"] - s[0]["s"]))
-                n = len(run)
-                if n <= 2:
-                    # selección corta (una/dos palabras): cortar EXACTO,
-                    # debe sonar solo lo seleccionado, sin añadir aire
-                    pad_before = 0.0
-                    pad_after = 0.0
-                else:
-                    # frases largas: un pequeño margen natural de respiración
-                    pad_before = 0.15
-                    pad_after = 0.25
+            n = len(run)
+            if n <= 2:
+                # selección corta (una/dos palabras): cortar EXACTO,
+                # debe sonar solo lo seleccionado, sin añadir aire
+                pad_before = 0.0
+                pad_after = 0.0
+            else:
+                # frases largas: un pequeño margen natural de respiración
+                pad_before = 0.15
+                pad_after = 0.25
 
-                # ---- límites con ANCLAS REALES + transcript ----
-                # Una palabra es "ancla real" si tiene match de verdad en el
-                # transcript (tj asignado y sim alto). Las demás (m=True pero
-                # tj=None / sim=0.5) tienen timestamps FALSOS (interpolados a
-                # 0.2s): usarlas como borde corta la frase a la mitad (p. ej.
-                # "...sufren y agoniz[an...]").
-                real_in_run = [w for w in run if _is_real_anchor(w)]
-                if real_in_run:
-                    # ancla real previa (antes de a) y siguiente (después de b)
-                    prev_anchor_e = None
-                    j = a - 1
-                    while j >= 0 and not _is_real_anchor(flat[j][2]):
-                        j -= 1
-                    if j >= 0:
-                        prev_anchor_e = float(flat[j][2]["e"])
-                    next_anchor_s = None
-                    j = b + 1
-                    while j < total and not _is_real_anchor(flat[j][2]):
-                        j += 1
-                    if j < total:
-                        next_anchor_s = float(flat[j][2]["s"])
-                    # palabras del transcript entre las anclas: marcan dónde
-                    # canta la frase de verdad (aunque el texto esté mal
-                    # transcrito, la POSICIÓN es real)
-                    reg_start = prev_anchor_e if prev_anchor_e is not None else 0.0
-                    reg_end = next_anchor_s if next_anchor_s is not None else float(dur)
-                    region = [w for w in transcript
-                              if float(w.get("start") or 0) >= reg_start - 0.01
-                              and float(w.get("start") or 0) <= reg_end + 0.01]
-                    # START: primer ancla real; si la cabeza está interpolada,
-                    # extender hacia atrás hasta el primer transcript de la
-                    # región, acotado por un estimado por palabra (no retroceder
-                    # hasta la frase anterior cuando la región es enorme)
-                    first_real = real_in_run[0]
-                    s0 = float(first_real["s"]) - pad_before
-                    if run[0] is not first_real and region:
-                        n_soft_head = 0
-                        for w in run:
-                            if _is_real_anchor(w):
-                                break
-                            n_soft_head += 1
-                        cap0 = float(first_real["s"]) - n_soft_head * 0.85 - 0.5
-                        s0 = min(s0, max(float(region[0]["start"]) - 0.08, cap0))
-                    s0 = max(0.0, s0)
-                    if prev_anchor_e is not None:
-                        s0 = max(s0, prev_anchor_e + 0.05)
-                    # END: última ancla real; si la cola está interpolada,
-                    # extender hasta el último transcript de la región, acotado
-                    # por un estimado por palabra (si la región es enorme, no
-                    # cruzar a la próxima frase) y por el inicio de la próxima
-                    # ancla real
-                    last_real = real_in_run[-1]
-                    e0 = float(last_real["e"]) + pad_after
-                    if run[-1] is not last_real and region:
-                        n_soft = 0
-                        for w in reversed(run):
-                            if _is_real_anchor(w):
-                                break
-                            n_soft += 1
-                        cap = float(last_real["e"]) + n_soft * 0.85 + 0.5
-                        e0 = min(max(e0, float(region[-1]["end"]) + 0.15), cap)
-                    if next_anchor_s is not None:
-                        # el tope NUNCA corta dentro de la última palabra real:
-                        # cuando las líneas son contiguas (la frase siguiente
-                        # empieza justo donde termina esta), next_anchor_s ≈
-                        # last_real.e y el tope viejo cortaba el final de la
-                        # palabra ("...ladrone[s]" se oía recortado).
-                        e0 = min(e0, max(next_anchor_s - 0.05,
-                                         float(last_real["e"]) + 0.05))
-                    next_first_s = None
-                    li_last = flat[run_i + len(run) - 1][0]
-                    nxt_lines = song.get("lines") or []
-                    if li_last + 1 < len(nxt_lines):
-                        nw = (nxt_lines[li_last + 1].get("words") or [])
-                        if nw and nw[0].get("s") is not None:
-                            next_first_s = float(nw[0]["s"])
-                    if next_first_s is not None:
-                        # (v23) tope DURO: la extensión de cola suave (n_soft)
-                        # no puede cruzar al arranque de la frase siguiente.
-                        # Antes, una cola con palabras "fantasma" del transcript
-                        # extendía el final HASTA DENTRO de la frase siguiente
-                        # (p. ej. L11 de NESOLO terminaba pisando el "No...").
-                        e0 = min(e0, max(next_first_s - 0.02,
-                                         float(last_real["e"]) + 0.05))
-                    e0 = min(float(dur), e0)
+            # ---- límites con ANCLAS REALES + transcript ----
+            # Una palabra es "ancla real" si tiene match de verdad en el
+            # transcript (tj asignado y sim alto). Las demás (m=True pero
+            # tj=None / sim=0.5) tienen timestamps FALSOS (interpolados a
+            # 0.2s): usarlas como borde corta la frase a la mitad (p. ej.
+            # "...sufren y agoniz[an...]").
+            real_in_run = [w for w in run if _is_real_anchor(w)]
+            if real_in_run:
+                # ancla real previa (antes de a) y siguiente (después de b)
+                prev_anchor_e = None
+                j = a - 1
+                while j >= 0 and not _is_real_anchor(flat[j][2]):
+                    j -= 1
+                if j >= 0:
+                    prev_anchor_e = float(flat[j][2]["e"])
+                next_anchor_s = None
+                j = b + 1
+                while j < total and not _is_real_anchor(flat[j][2]):
+                    j += 1
+                if j < total:
+                    next_anchor_s = float(flat[j][2]["s"])
+                # palabras del transcript entre las anclas: marcan dónde
+                # canta la frase de verdad (aunque el texto esté mal
+                # transcrito, la POSICIÓN es real)
+                reg_start = prev_anchor_e if prev_anchor_e is not None else 0.0
+                reg_end = next_anchor_s if next_anchor_s is not None else float(dur)
+                region = [w for w in transcript
+                          if float(w.get("start") or 0) >= reg_start - 0.01
+                          and float(w.get("start") or 0) <= reg_end + 0.01]
+                # START: primer ancla real; si la cabeza está interpolada,
+                # extender hacia atrás hasta el primer transcript de la
+                # región, acotado por un estimado por palabra (no retroceder
+                # hasta la frase anterior cuando la región es enorme)
+                first_real = real_in_run[0]
+                s0 = float(first_real["s"]) - pad_before
+                if run[0] is not first_real and region:
+                    n_soft_head = 0
+                    for w in run:
+                        if _is_real_anchor(w):
+                            break
+                        n_soft_head += 1
+                    cap0 = float(first_real["s"]) - n_soft_head * 0.85 - 0.5
+                    s0 = min(s0, max(float(region[0]["start"]) - 0.08, cap0))
+                s0 = max(0.0, s0)
+                if prev_anchor_e is not None:
+                    s0 = max(s0, prev_anchor_e + 0.05)
+                # END: última ancla real; si la cola está interpolada,
+                # extender hasta el último transcript de la región, acotado
+                # por un estimado por palabra (si la región es enorme, no
+                # cruzar a la próxima frase) y por el inicio de la próxima
+                # ancla real
+                last_real = real_in_run[-1]
+                e0 = float(last_real["e"]) + pad_after
+                if run[-1] is not last_real and region:
+                    n_soft = 0
+                    for w in reversed(run):
+                        if _is_real_anchor(w):
+                            break
+                        n_soft += 1
+                    cap = float(last_real["e"]) + n_soft * 0.85 + 0.5
+                    e0 = min(max(e0, float(region[-1]["end"]) + 0.15), cap)
+                if next_anchor_s is not None:
+                    # el tope NUNCA corta dentro de la última palabra real:
+                    # cuando las líneas son contiguas (la frase siguiente
+                    # empieza justo donde termina esta), next_anchor_s ≈
+                    # last_real.e y el tope viejo cortaba el final de la
+                    # palabra ("...ladrone[s]" se oía recortado).
+                    e0 = min(e0, max(next_anchor_s - 0.05,
+                                     float(last_real["e"]) + 0.05))
+                next_first_s = None
+                li_last = flat[run_i + len(run) - 1][0]
+                nxt_lines = song.get("lines") or []
+                if li_last + 1 < len(nxt_lines):
+                    nw = (nxt_lines[li_last + 1].get("words") or [])
+                    if nw and nw[0].get("s") is not None:
+                        next_first_s = float(nw[0]["s"])
+                if next_first_s is not None:
+                    # (v23) tope DURO: la extensión de cola suave (n_soft)
+                    # no puede cruzar al arranque de la frase siguiente.
+                    # Antes, una cola con palabras "fantasma" del transcript
+                    # extendía el final HASTA DENTRO de la frase siguiente
+                    # (p. ej. L11 de NESOLO terminaba pisando el "No...").
+                    e0 = min(e0, max(next_first_s - 0.02,
+                                     float(last_real["e"]) + 0.05))
+                e0 = min(float(dur), e0)
+            else:
+                # toda la run está interpolada (sin anclas reales): su
+                # posición puede ser falsa (el align a veces interpola la
+                # frase hacia OTRA parte del audio). Preferir el segmento
+                # posicional local; si no aplica, timestamps locales.
+                lines_g = song.get("lines") or []
+                li_a = flat[a][0]
+                li_s = lines_g[li_a].get("s") if li_a < len(lines_g) else None
+                li_e = lines_g[li_a].get("e") if li_a < len(lines_g) else None
+                cand = None
+                if pos_seg:
+                    s0p, e0p = pos_seg
+                    # (v27) el respaldo posicional NO puede salirse de la
+                    # propia línea: si el transcript del hueco cae fuera (p.
+                    # ej. la frase se cantó y el hueco sobrante es
+                    # instrumental), preferir los timestamps interpolados del
+                    # aligner, que están dentro de la línea.
+                    if li_s is not None and li_e is not None:
+                        s0p = max(s0p, li_s)
+                        e0p = min(e0p, li_e)
+                    if e0p - s0p > 0.05:
+                        cand = (s0p, e0p)
+                if cand is not None:
+                    s0, e0 = cand
                 else:
-                    # toda la run está interpolada (sin anclas reales): su
-                    # posición puede ser falsa (el align a veces interpola la
-                    # frase hacia OTRA parte del audio). Preferir el segmento
-                    # posicional local; si no aplica, timestamps locales.
-                    if pos_seg:
-                        s0, e0 = pos_seg
-                    else:
+                    s0 = max(0.0, run[0]["s"] - pad_before)
+                    e0 = min(dur, run[-1]["e"] + pad_after)
+                    if li_s is not None and li_e is not None:
+                        s0 = max(s0, li_s)
+                        e0 = min(e0, li_e)
+                    if e0 - s0 <= 0.05:
+                        # timestamps interpolados crudos (sin acotar a la línea:
+                        # el aligner puede haberlos puesto bien igual)
                         s0 = max(0.0, run[0]["s"] - pad_before)
                         e0 = min(dur, run[-1]["e"] + pad_after)
-                        if run[-1].get("sim", 1.0) <= 0.55 or run[-1].get("tj") is None:
-                            e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
-                # ---- fronteras de voz reales (v20): recortar del inicio la
-                # cola de la frase anterior y extender el final hasta el último
-                # valle antes del arranque de la frase siguiente ----
-                s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
-                if e0 - s0 > 0.05:
-                    segments.append((s0, e0, ptext))
+                    if run[-1].get("sim", 1.0) <= 0.55 or run[-1].get("tj") is None:
+                        e0 = _speech_tail(src, s0, e0, dur, transcript, nxt)
+            # ---- fronteras de voz reales (v20): recortar del inicio la
+            # cola de la frase anterior y extender el final hasta el último
+            # valle antes del arranque de la frase siguiente ----
+            s0, e0 = _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src)
+            if e0 - s0 > 0.05:
+                segments.append((s0, e0, ptext, phi))
 
+    # (v27) tope entre apariciones de la MISMA frase: las fronteras de voz
+    # extienden el final hasta la SIGUIENTE LÍNEA, pero si la frase se repite
+    # dentro de la misma línea/coro (p. ej. "Ten piedad, ten piedad"), dos
+    # apariciones adyacentes se pisarían y se fusionarían en un solo
+    # fragmento (el recuento decía N pero sonaban menos). Acá se tope cada
+    # aparición con el inicio de la siguiente, así cada una es su propio
+    # fragmento y el recuento coincide con lo que se reproduce.
+    if len(segments) > 1:
+        by_phi = {}
+        for seg in segments:
+            by_phi.setdefault(seg[3], []).append(seg)
+        capped = []
+        for phi, segs in by_phi.items():
+            segs.sort(key=lambda s: s[0])
+            for idx in range(len(segs) - 1):
+                s0, e0, txt, p = segs[idx]
+                ns = segs[idx + 1][0]
+                if e0 > ns + 0.05:
+                    segs[idx] = (s0, ns, txt, p)
+            capped.extend(segs)
+        segments = capped
     # sin solapamientos: si dos frases pedidas comparten audio (el final de
     # una con el inicio de la otra), se corría dos veces el mismo pedazo y la
     # costura sonaba a corte. Cada segmento empieza donde terminó el anterior
@@ -1468,11 +1597,11 @@ def render(sid: str, payload: dict):
     if len(segments) > 1:
         segments.sort(key=lambda s: s[0])
         clipped = []
-        for s0, e0, txt in segments:
+        for s0, e0, txt, p in segments:
             if clipped and s0 < clipped[-1][1]:
                 s0 = clipped[-1][1]
             if e0 - s0 > 0.05:
-                clipped.append((s0, e0, txt))
+                clipped.append((s0, e0, txt, p))
         segments = clipped
 
     if skipped and not segments:
@@ -1486,7 +1615,8 @@ def render(sid: str, payload: dict):
     merged = []
     for seg in segments:
         if merged and seg[0] < merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], seg[1]), merged[-1][2])
+            merged[-1] = (merged[-1][0], max(merged[-1][1], seg[1]),
+                          merged[-1][2], merged[-1][3])
         else:
             merged.append(seg)
     segments = merged
@@ -1501,7 +1631,7 @@ def render(sid: str, payload: dict):
     GAP = 0.2
     timeline = []
     at = 0.0
-    for s0, e0, txt in segments:
+    for s0, e0, txt, _ in segments:
         timeline.append({
             "start": round(s0, 2),
             "end": round(e0, 2),
@@ -1517,12 +1647,12 @@ def render(sid: str, payload: dict):
     fname = f"{uid}_{chash}.mp3"
     out = RENDER_DIR / f"{sid}_{fname}"
     if not out.exists():
-        au.render_phrases(src, [(s, e) for s, e, _ in segments], str(out))
+        au.render_phrases(src, [(s, e) for s, e, _, _ in segments], str(out))
         # subir a la nube en segundo plano: el GET sirve desde disco y no
         # bloquea el POST (GitHub puede tardar segundos con archivos grandes)
         threading.Thread(target=_upload_render_safe,
                          args=(sid, fname, str(out)), daemon=True).start()
-    return {
+    resp = {
         "url": f"/api/songs/{sid}/render/{fname}",
         "segments": len(segments),
         "duration": au.ffprobe_duration(str(out)),
@@ -1531,6 +1661,10 @@ def render(sid: str, payload: dict):
         "phrases": phrases,
         "timeline": timeline,
     }
+    if len(_render_cache) > _RENDER_CACHE_MAX:
+        _render_cache.clear()
+    _render_cache[ckey] = resp
+    return resp
 
 def _upload_render_safe(sid, fname, local_path):
     """Sube el render a la nube y poda los renders viejos. Nunca lanza."""
@@ -1562,11 +1696,8 @@ def occurrences(sid: str, payload: dict):
         b = min(total - 1, int(b))
         if a > b:
             continue
-        subs = _repeated_line_ranges(song, flat, a, b)
-        li0 = flat[a][0]
-        lines = song.get("lines") or []
-        txt = " ".join(w.get("raw", "") for w in
-                       ((lines[li0].get("words") or []) if li0 < len(lines) else []))
+        subs = _all_occurrences(song, flat, a, b)
+        txt = " ".join(w.get("raw", "") for (_, _, w) in flat[a:b + 1]).strip()
         times = []
         for (a2, b2) in subs:
             w0 = flat[a2][2]
