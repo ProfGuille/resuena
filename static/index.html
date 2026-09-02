@@ -1021,7 +1021,7 @@ async function saveSel(){
 /* ---------- audio ---------- */
 const fullAudio = new Audio();
 let _fullRetries = 0;              // (v32) reintentos del play de la canción completa
-const _FULL_MAX_RETRIES = 3;
+const _FULL_MAX_RETRIES = 4;
 let _fullRetrying = false;         // true mientras playFullAudio está reintentando
 fullAudio.addEventListener('play', () => {
   // (v32) cuando el audio efectivamente arranca (tras un reintento), el botón
@@ -1054,21 +1054,34 @@ function showFullErr(msg){
  * deploy y el mp3 tarda en cargar), se recarga el audio y se reintenta antes
  * de rendirse — igual que el audio de frases. Antes, el fallo dejaba el botón
  * en ⏸ sin sonido y sin mensaje. */
+function fullAudioUrl(){
+  // (v33) cache-buster SIEMPRE: evita que el navegador reutilice una
+  // respuesta fallida (p. ej. del momento en que el servidor estaba bajando
+  // el mp3 de GitHub tras un reinicio y respondió lento o 404). El audio de
+  // frases ya usaba ?v=Date.now(); el de la canción completa no lo hacía.
+  return `/api/songs/${state.song.id}/audio?v=${Date.now()}`;
+}
 function playFullAudio(){
-  if (!fullAudio.src) fullAudio.src = `/api/songs/${state.song.id}/audio`;
+  if (!fullAudio.src) fullAudio.src = fullAudioUrl();
   fullAudio.play().then(() => {
     // (v32) si llegó a sonar (quizás tras reintentos), limpiar el estado
     _fullRetries = 0; _fullRetrying = false;
-  }).catch(() => {
+  }).catch((err) => {
     if (_fullRetries < _FULL_MAX_RETRIES){
       _fullRetries++; _fullRetrying = true;
       $('btnPlay').textContent = '⏳ preparando…';
-      fullAudio.load();
-      setTimeout(() => { playFullAudio(); }, 1500 * _fullRetries);
+      // (v33) reintentar con paciencia y pedir una respuesta LIMPIA (nuevo
+      // ?v). La primera vez tras un reinicio el servidor free tiene que bajar
+      // el mp3 de GitHub y puede tardar 10-20 s; esperar 2s,4s,6s,8s entre
+      // intentos (sin load() destructivo) deja que esa descarga complete.
+      setTimeout(() => { fullAudio.src = fullAudioUrl(); playFullAudio(); }, 2000 * _fullRetries);
     } else {
       _fullRetries = 0; _fullRetrying = false;
       $('btnPlay').textContent = '▶';
-      showFullErr('El audio tardó demasiado (el servidor estaba arrancando). Tocá ▶ de nuevo para reintentar.');
+      const why = (err && err.name === 'NotSupportedError')
+        ? 'el navegador no pudo reproducir el formato del audio'
+        : 'el audio tardó demasiado en cargar (la primera vez tras un reinicio el servidor descarga la canción)';
+      showFullErr(why + '. Tocá ▶ de nuevo para reintentar.');
     }
   });
 }
