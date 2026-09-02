@@ -339,14 +339,17 @@ def _ensure_render(sid, fname):
     return f
 
 # ---------------------------------------------------------------- frontend
-@app.get("/")
+# (v36) HEAD además de GET: los monitores de uptime (UptimeRobot HTTP/S)
+# consultan con HEAD, y FastAPI por defecto solo responde GET -> 405 -> el
+# monitor marcaba la app como "Down" aunque estaba sana.
+@app.api_route("/", methods=["GET", "HEAD"])
 def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ---------------------------------------------------------------- canciones
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
     storage = "github" if ghstore.enabled() else ("r2" if cloud.cloud_enabled() else "local")
     return {"ok": True, "model": _pick_model(), "storage": storage, "version": VERSION}
@@ -455,7 +458,7 @@ def delete_song(sid: str):
         media.delete_prefix(f"render/{sid}/")
     return {"ok": True}
 
-@app.get("/api/songs/{sid}/audio")
+@app.api_route("/api/songs/{sid}/audio", methods=["GET", "HEAD"])
 def song_audio(sid: str):
     if not store.get_song(sid):
         raise HTTPException(404, "Canción no encontrada")
