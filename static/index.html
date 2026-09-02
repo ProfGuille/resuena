@@ -142,6 +142,13 @@
   .banner.show{display:block}
   .banner.info{background:rgba(34,211,238,.09);border:1px solid rgba(34,211,238,.3);color:#a5eefb}
   .banner.err{background:rgba(255,107,107,.09);border:1px solid rgba(255,107,107,.35);color:#ffb3b3}
+  .banner.howto{background:rgba(163,230,53,.08);border:1px solid rgba(163,230,53,.3);color:#d9f5ab;position:relative;padding-right:44px}
+  .banner.howto .howto-title{font-size:13.5px;color:#eafcc9}
+  .howto-steps{display:flex;flex-wrap:wrap;gap:8px 24px;margin-top:8px}
+  .howto-step{font-size:12.5px;line-height:1.5;color:var(--text)}
+  .howto-step b{color:var(--accent2)}
+  .howto-close{position:absolute;top:6px;right:8px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 7px;border-radius:6px}
+  .howto-close:hover{background:rgba(255,255,255,.08);color:var(--text)}
   .cols{display:grid;grid-template-columns:1fr 360px;gap:22px;align-items:start}
   @media (max-width:900px){.cols{grid-template-columns:1fr}}
 
@@ -290,6 +297,20 @@
   </div>
   <div class="banner info" id="covBanner"></div>
   <div class="banner err" id="errBanner"></div>
+
+  <!-- (v32) Instrucciones al entrar por ENLACE DIRECTO (?song=…): quien llega
+       desde un link compartido no pasa por la biblioteca (donde están los
+       pasos 1-2-3) y aterriza directo en el editor. Se muestra solo en ese
+       caso; se puede cerrar con la ✕ y no aparece en el flujo normal. -->
+  <div class="banner howto" id="howtoBox">
+    <span class="howto-title">🎧 ¿Cómo funciona?</span>
+    <div class="howto-steps">
+      <span class="howto-step"><b>1.</b> <b>Pintá</b> sobre la letra las frases que te resuenan (clic o arrastre; podés elegir varias).</span>
+      <span class="howto-step"><b>2.</b> Tildá <b>“Incluir todas las apariciones”</b> si la frase se repite (p. ej. coros).</span>
+      <span class="howto-step"><b>3.</b> Tocá <b>🎬 Generar audio con mis frases</b> y después <b>▶ Escuchar</b> o <b>⬇ Descargar</b>.</span>
+    </div>
+    <button class="howto-close" onclick="closeHowto()" title="Cerrar instrucciones">✕</button>
+  </div>
 
   <div class="cols">
     <div>
@@ -1327,6 +1348,14 @@ async function shareSongId(id){
 }
 
 /* ============================================================ init */
+function showHowto(){
+  const h = $('howtoBox');
+  if (h) h.classList.add('show');
+}
+function closeHowto(){
+  const h = $('howtoBox');
+  if (h) h.classList.remove('show');
+}
 (function init(){
   setupSelAudio();
   loadStorageInfo();
@@ -1334,7 +1363,9 @@ async function shareSongId(id){
   const sidParam = sp.get('song');
   if (sidParam){
     // enlace directo a una canción: ir directo al editor, sin biblioteca
-    openSong(sidParam);
+    // (v32) y mostrar las instrucciones, porque este visitante no pasó por
+    // la biblioteca donde están los pasos 1-2-3.
+    openSong(sidParam).then(() => { if (state.song) showHowto(); });
   } else {
     showLib();
   }
