@@ -316,14 +316,20 @@ def _ensure_audio(sid):
     externo si hace falta o si quedó vacío por una descarga fallida)."""
     f = AUDIO_DIR / f"{sid}.mp3"
     if (not f.exists() or f.stat().st_size == 0) and media.persistent():
-        media.get_file(f"song/{sid}.mp3", str(f))
-        if not f.exists() or f.stat().st_size == 0:
-            # (v29) reintento: GitHub a veces devuelve timeout en la primera
-            # pasada; el audio completo es imprescindible para reproducir.
+        # (v33) reintentos con pausa: la primera vez tras un reinicio/deploy
+        # el disco efímero está vacío y hay que bajar el mp3 (varios MB) de
+        # GitHub. El primer intento a veces falla por timeout o porque la
+        # instancia free está arrancando; antes eran 2 intentos seguidos sin
+        # pausa y el play de la canción completa fallaba justo después de un
+        # deploy. Ahora: hasta 3 intentos con 3 s de espera entre medio.
+        for _ in range(3):
             try:
                 media.get_file(f"song/{sid}.mp3", str(f))
             except Exception:
                 pass
+            if f.exists() and f.stat().st_size > 0:
+                break
+            time.sleep(3)
     return f
 
 def _ensure_render(sid, fname):
