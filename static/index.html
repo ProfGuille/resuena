@@ -1021,7 +1021,7 @@ async function saveSel(){
 /* ---------- audio ---------- */
 const fullAudio = new Audio();
 let _fullRetries = 0;              // (v32) reintentos del play de la canción completa
-const _FULL_MAX_RETRIES = 4;
+const _FULL_MAX_RETRIES = 5;
 let _fullRetrying = false;         // true mientras playFullAudio está reintentando
 fullAudio.addEventListener('play', () => {
   // (v32) cuando el audio efectivamente arranca (tras un reintento), el botón
@@ -1036,8 +1036,15 @@ fullAudio.addEventListener('timeupdate', () => {
 fullAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(fullAudio.duration); });
 fullAudio.addEventListener('ended', () => { $('btnPlay').textContent = '▶'; $('seekBar').value = 0; });
 fullAudio.addEventListener('error', () => {
-  if (state.mode === 'full' && !fullAudio.src.includes('blob:') && !_fullRetrying){
-    showFullErr('No se pudo cargar el audio de la canción (el servidor se reinició o está arrancando). Tocá ▶ de nuevo; si sigue así, recargá la página.');
+  // (v35) NO mostrar mensaje acá: un error del elemento puede ser transitorio
+  // (p. ej. el servidor free recién reiniciado todavía está bajando el mp3 de
+  // GitHub, o el navegador abortó la carga al reintentar con un ?v= nuevo).
+  // El único mensaje real lo maneja playFullAudio(), que reintenta solo y
+  // avisa recién si se agotan todos los intentos. Así no aparece un error
+  // "fatal" que después se contradice (el audio termina sonando solo).
+  if (state.mode === 'full' && !fullAudio.src.includes('blob:')){
+    // loguear en consola para diagnóstico, sin asustar al usuario
+    if (window.console && console.log) console.log('[resuena] error del audio completo (transitorio, se reintenta):', fullAudio.error && fullAudio.error.code);
   }
 });
 /* (v32) mensaje de error del audio visible: el renderWarn está dentro del
