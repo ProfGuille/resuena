@@ -1020,6 +1020,14 @@ async function saveSel(){
 
 /* ---------- audio ---------- */
 const fullAudio = new Audio();
+let _fullRetries = 0;              // (v32) reintentos del play de la canción completa
+const _FULL_MAX_RETRIES = 3;
+let _fullRetrying = false;         // true mientras playFullAudio está reintentando
+fullAudio.addEventListener('play', () => {
+  // (v32) cuando el audio efectivamente arranca (tras un reintento), el botón
+  // deja de mostrar "preparando…" y pasa a ⏸
+  if (state.mode === 'full') $('btnPlay').textContent = '⏸';
+});
 fullAudio.addEventListener('timeupdate', () => {
   if (state.mode !== 'full') return;
   if (fullAudio.duration) $('seekBar').value = fullAudio.currentTime / fullAudio.duration * 100;
@@ -1028,12 +1036,42 @@ fullAudio.addEventListener('timeupdate', () => {
 fullAudio.addEventListener('loadedmetadata', () => { $('totTime').textContent = fmt(fullAudio.duration); });
 fullAudio.addEventListener('ended', () => { $('btnPlay').textContent = '▶'; $('seekBar').value = 0; });
 fullAudio.addEventListener('error', () => {
-  if (state.mode === 'full' && !fullAudio.src.includes('blob:')){
-    const w = $('renderWarn');
-    w.textContent = '⚠ No se pudo cargar el audio de la canción (el servidor se reinició). Volvé a abrir la canción para recuperarlo.';
-    w.style.display = '';
+  if (state.mode === 'full' && !fullAudio.src.includes('blob:') && !_fullRetrying){
+    showFullErr('No se pudo cargar el audio de la canción (el servidor se reinició o está arrancando). Tocá ▶ de nuevo; si sigue así, recargá la página.');
   }
 });
+/* (v32) mensaje de error del audio visible: el renderWarn está dentro del
+ * panel de frases (oculto hasta generar audio), así que también se muestra
+ * en el banner de error del editor, que sí es visible. */
+function showFullErr(msg){
+  const w = $('renderWarn');
+  if (w){ w.textContent = '⚠ ' + msg; w.style.display = ''; }
+  const eb = $('errBanner');
+  if (eb){ eb.textContent = '⚠ ' + msg; eb.classList.add('show'); }
+}
+/* (v32) reproducir la canción completa con reintento: si el play() falla
+ * (típicamente porque el servidor free está arrancando tras un reinicio o
+ * deploy y el mp3 tarda en cargar), se recarga el audio y se reintenta antes
+ * de rendirse — igual que el audio de frases. Antes, el fallo dejaba el botón
+ * en ⏸ sin sonido y sin mensaje. */
+function playFullAudio(){
+  if (!fullAudio.src) fullAudio.src = `/api/songs/${state.song.id}/audio`;
+  fullAudio.play().then(() => {
+    // (v32) si llegó a sonar (quizás tras reintentos), limpiar el estado
+    _fullRetries = 0; _fullRetrying = false;
+  }).catch(() => {
+    if (_fullRetries < _FULL_MAX_RETRIES){
+      _fullRetries++; _fullRetrying = true;
+      $('btnPlay').textContent = '⏳ preparando…';
+      fullAudio.load();
+      setTimeout(() => { playFullAudio(); }, 1500 * _fullRetries);
+    } else {
+      _fullRetries = 0; _fullRetrying = false;
+      $('btnPlay').textContent = '▶';
+      showFullErr('El audio tardó demasiado (el servidor estaba arrancando). Tocá ▶ de nuevo para reintentar.');
+    }
+  });
+}
 
 /* Un solo reproductor para las frases: el <audio> del panel */
 function setupSelAudio(){
@@ -1103,8 +1141,8 @@ function togglePlay(){
   } else {
     if (selAudio) selAudio.pause();
     // carga perezosa: el mp3 completo recién se pide acá (primera vez)
-    if (!fullAudio.src) fullAudio.src = `/api/songs/${state.song.id}/audio`;
-    if (fullAudio.paused){ fullAudio.play(); $('btnPlay').textContent='⏸'; }
+    // (v32) el play con reintento lo maneja playFullAudio()
+    if (fullAudio.paused){ playFullAudio(); $('btnPlay').textContent='⏸'; }
     else { fullAudio.pause(); $('btnPlay').textContent='▶'; }
   }
 }
