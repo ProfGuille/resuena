@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v31"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy
+VERSION = "v38"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v38: colas sostenidas + frases crammeadas)
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -131,8 +131,19 @@ def _proc_worker():
             song = store.get_song(sid)
             if song is not None:
                 _process_song_impl(sid)
-        except Exception:
-            pass
+        except Exception as e:
+            # (v37) si algo explota FUERA del try interno de _process_song_impl,
+            # dejar constancia en la canción en vez de quedara en "processing"
+            # para siempre (antes: except: pass = PROCESANDO eterno sin motivo).
+            try:
+                s = store.get_song(sid)
+                if s is not None and s.get("status") == "processing":
+                    s["status"] = "error"
+                    s["error"] = "Error interno del análisis: " + str(e)[:300]
+                    s["phase"] = None
+                    store.save_song(sid, s, durable=True)
+            except Exception:
+                pass
         finally:
             _proc_queue.task_done()
 
@@ -980,6 +991,50 @@ def _held_note_end(env, lo_end, cap):
         return j * 0.01 + 0.05
     return None
 
+def _held_tail_end(song, lo_end, cap_s):
+    """(v38) Fin de la COLA SOSTENIDA de la última palabra de una frase.
+
+    Whisper a veces separa la vocal final sostenida en un token aparte que
+    no corresponde a ninguna palabra de la letra (p. ej. "reencuentro"
+    cantado largo -> "recuento" 42.52-43.70 + "lo" 43.70-44.66). Si cortamos
+    en el fin de la palabra real, la nota queda recortada a la mitad.
+
+    Devuelve el fin del último token LIBRE (no casado con la letra) que
+    arranca pegado al fin de la última palabra real y se extiende más allá,
+    o None si no hay. Nunca pasa del arranque de la frase siguiente (cap_s).
+    """
+    if lo_end is None:
+        return None
+    try:
+        tw = song.get("transcript_words") or []
+        if not tw:
+            return None
+        used = set()
+        for ln in (song.get("lines") or []):
+            for w in (ln.get("words") or []):
+                if w.get("tj") is not None:
+                    used.add(w.get("tj"))
+        best = None
+        for i, w in enumerate(tw):
+            try:
+                st = float(w.get("start") or 0)
+                en = float(w.get("end") or 0)
+            except Exception:
+                continue
+            if st < lo_end - 0.05 or st > lo_end + 0.35:
+                continue          # no arranca pegado al fin de la palabra
+            if en <= lo_end + 0.10:
+                continue          # no extiende nada
+            if i in used:
+                continue          # ese token ES una palabra de la letra
+            if cap_s is not None and en > float(cap_s) - 0.02:
+                continue          # se mete en la frase siguiente
+            best = max(best or 0.0, en)
+        return best
+    except Exception:
+        return None
+
+
 def _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src,
                             first_s_ov=None, lo_end_ov=None,
                             prev_end_ov=None, next_first_s_ov=None,
@@ -1225,6 +1280,26 @@ def _apply_voice_boundaries(song, flat, run, run_i, s0, e0, dur, src,
         e0 = min(float(dur), max(0.0, e0))
         if e0 - s0 > 0.05:
             s0 = min(max(0.0, s0), e0 - 0.05)
+        # (v38) cola sostenida: no cortar la nota final a mitad si el
+        # transcript muestra que la voz sigue (tokens libres pegados al fin
+        # de la última palabra real). Topes: nunca cruza a la frase
+        # siguiente (aunque la línea inmediata esté sin alinear, buscar la
+        # próxima palabra real) ni suena más de 2 s extra de cola.
+        hold_cap = next_first_s
+        if hold_cap is None and run_i is not None and li1 is not None:
+            for _ln2 in lines[li1 + 1: li1 + 6]:
+                for _w2 in (_ln2.get("words") or []):
+                    if _w2.get("s") is not None:
+                        hold_cap = float(_w2["s"])
+                        break
+                if hold_cap is not None:
+                    break
+        hold = _held_tail_end(song, lo_end, hold_cap)
+        if hold is not None:
+            cand = min(float(dur), hold, float(lo_end) + 2.0,
+                       (hold_cap - 0.02) if hold_cap is not None else hold)
+            if cand > e0 + 0.05:
+                e0 = cand
         return s0, e0
     except Exception:
         return s0, e0
@@ -1563,6 +1638,29 @@ def render(sid: str, payload: dict):
             continue
 
         for run_i, run in runs:
+            # (v38) frase con timestamps ROTOS: toda la frase crammeada en
+            # menos de ~0.25 s por palabra (la interpolación del aligner usa
+            # pasos de 0.2 s: las frases rotas quedan en ~0.21-0.22; el canto
+            # rápido real de una canción movida ronda 0.29+ y NO debe tocarce).
+            # Si hay posición real conocida (pos_seg entre anclas vecinas),
+            # usar ESA en vez de los timestamps rotos (caso "sucumbiremos al
+            # desánimo y al llanto": 6 palabras en 1.32 s -> el corte sonaba
+            # solo un pedazo).
+            if (pos_seg and len(runs) == 1 and len(run) >= 3
+                    and run[0].get("s") is not None
+                    and run[-1].get("e") is not None
+                    and (float(run[-1]["e"]) - float(run[0]["s"])) / len(run) < 0.25):
+                ps, pe = pos_seg
+                # Si la PRIMERA palabra tiene match real y fuerte (sim>=0.8),
+                # su timestamp es de confianza: el arranque de la frase es EL
+                # DE ELLA (los tokens libres previos del hueco pueden ser la
+                # cola/melisma de la frase ANTERIOR, p. ej. "…silencio"
+                # prolongado antes de "del alma escribes…").
+                if (_is_real_anchor(run[0])
+                        and float(run[0].get("sim") or 1.0) >= 0.8):
+                    ps = max(ps, float(run[0]["s"]) - 0.15)
+                segments.append((ps, pe, ptext, phi))
+                continue
             # robustez: si los timestamps del tramo son inverosímiles
             # (huecos enormes entre palabras contiguas -> el align unió la
             # frase con audio de otra sección), dividir en los huecos y
@@ -1989,7 +2087,18 @@ def _process_song_impl(sid):
         )
         segs = []
         words = []
+        # (v37) progreso real durante la transcripción: la UI muestra
+        # "analizando N%" en vivo. En el plan free (0.1 CPU) la transcripción
+        # puede tardar ~20-30 min por canción; sin % el usuario cree que está
+        # colgada (pasó con "Si Tú no vienes": 27 min y terminó bien).
+        _total = float(song.get("duration") or 0)
+        _last_pct = -5
         for seg in seg_iter:
+            if _total > 0:
+                _pct = min(99, int(100.0 * float(seg.end) / _total))
+                if _pct >= _last_pct + 5:
+                    _last_pct = _pct
+                    _set_phase(sid, f"transcribiendo {_pct}%")
             segs.append({"text": seg.text or "",
                          "start": float(seg.start), "end": float(seg.end)})
             for w in (seg.words or []):
