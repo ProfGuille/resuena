@@ -456,6 +456,15 @@ function newUser(){
   state.timeline = null;
   state.rainOn = false;
   stopRain();
+  // (v37) el visitante nuevo arranca SIN audio generado: ocultar el cuadro
+  // del render anterior y limpiar sus carteles (antes quedaba visible el
+  // audio del visitante anterior con su nota de duración).
+  $('renderBox').style.display = 'none';
+  $('renderNote').innerHTML = '';
+  $('renderWarn').style.display = 'none';
+  $('renderErr').style.display = 'none';
+  $('dlLink').removeAttribute('href');
+  $('btnSelPlay').textContent = '▶ Escuchar';
   $('userPill').textContent = '👤 usuario ' + state.uid;
   if (state.song){
     loadSel(state.song.id).then(() => { renderSong(); });
@@ -526,7 +535,7 @@ function renderLibrary(){
     const st = s.status;
     const chip = st==='ready' ? '<span class="status ready">✓ lista</span>'
       : st==='error' ? `<span class="status error">✗ error</span>`
-      : `<span class="status processing"><span class="spin"></span>${s.phase==='transcribiendo'?'analizando':s.phase==='encolado'?'en cola':'procesando'}</span>`;
+      : `<span class="status processing"><span class="spin"></span>${procChip(s.phase)}</span>`;
     const dur = s.duration ? fmt(s.duration) : '';
     const src = s.source==='youtube' ? '▶ YouTube' : '📁 archivo';
     return `<div class="card">
@@ -589,11 +598,26 @@ function showErr(msg){
   $('errBanner').textContent = '⚠ ' + msg;
   $('errBanner').classList.add('show');
 }
+// (v36) chip de "procesando" en la biblioteca: muestra el % real que reporta
+// el servidor (p.ej. phase="transcribiendo 45%" -> "analizando 45%")
+function procChip(p){
+  if (p === 'encolado') return 'en cola';
+  if (p && p.indexOf('transcribiendo') === 0){
+    const pct = p.split(' ')[1];
+    return pct ? ('analizando ' + pct) : 'analizando';
+  }
+  return 'procesando';
+}
 function phaseText(p){
+  // (v36) la transcripción puede tardar 20-30 min en el plan gratis:
+  // mostrar el % en vivo y avisar, para que nadie crea que está colgada
+  if (p && p.indexOf('transcribiendo') === 0){
+    const pct = p.indexOf(' ') > -1 ? ' (' + p.split(' ').slice(1).join(' ') + ')' : '';
+    return 'Analizando la voz y alineando la letra' + pct + '. En el plan gratis puede tardar 20–30 minutos por canción: dejá esta página abierta, se actualiza sola…';
+  }
   return {
     'encolado': 'En cola: hay otra canción analizándose antes…',
     'descargando': 'Descargando el audio y preparando el análisis…',
-    'transcribiendo': 'Analizando la voz y alineando la letra con el audio. Puede tardar varios minutos la primera vez…',
     'guardando': '¡Ya casi! Guardando el resultado…',
   }[p] || 'Analizando la canción y alineando la letra con el audio…';
 }
@@ -1429,5 +1453,5 @@ function closeHowto(){
   }
 })();
 </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a404ea387d300ec2',t:'MTc5MDI4NTY4NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
