@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v38"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v38: colas sostenidas + frases crammeadas)
+VERSION = "v39"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v38: colas sostenidas + frases crammeadas)
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -308,6 +308,18 @@ async def lifespan(app):
     yield
 
 app = FastAPI(title="Resuena", lifespan=lifespan)
+
+# (v39) CORS para el bookmarklet "Agregar desde YouTube": el usuario hace clic
+# en un favorito dentro de youtube.com y el navegador sube el audio directo a
+# la app (misma técnica de las extensiones: correr en el navegador del usuario,
+# con SU IP y SU sesión, que es lo que YouTube no puede bloquear).
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.middleware("http")
 async def no_store_cache(request, call_next):
