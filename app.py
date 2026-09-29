@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v39"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v38: colas sostenidas + frases crammeadas)
+VERSION = "v40"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v39: CORS + cookies; v40: estrategia default sin clientes forzados)
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
