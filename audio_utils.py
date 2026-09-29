@@ -2,6 +2,7 @@
 import os
 import shutil
 import subprocess
+import time
 
 import ffmpeg_util
 
@@ -131,12 +132,13 @@ def download_youtube(url, dst_dir, song_id):
         ImpersonateTarget = None
 
     outtmpl = os.path.join(str(dst_dir), f"{song_id}.%(ext)s")
-    # Estrategias de descarga de YouTube. Sin la librería curl_cffi (que sí
-    # está en requirements.txt), YouTube devuelve 403 a IPs de datacenter
-    # (Render). Con curl_cffi, yt-dlp puede imitar un navegador real y pasa.
-    # Se prueban en orden: las impersonadas primero (más confiables), luego
-    # los clientes móviles/tv (menos bloqueados), y al final web pelado.
+    # Estrategias (orden revisado 2026-09): los clientes forzados uno a uno
+    # (web, android, tv...) dejaron de devolver formatos ("No video formats").
+    # Lo que funciona es el SET POR DEFECTO de yt-dlp (sin forzar nada), con
+    # o sin cookies. Va primero y también de última red. Las demás quedan
+    # como respaldo por si YouTube vuelve a cambiar.
     strategies = [
+        {"name": "default",        "clients": None,               "fmt": "bestaudio/best"},
         {"name": "web-imp",       "clients": ["web"],           "fmt": "bestaudio/best", "impersonate": "chrome"},
         {"name": "web-imp-v",     "clients": ["web"],           "fmt": "best",           "impersonate": "chrome"},
         {"name": "safari-imp",    "clients": ["web_safari"],    "fmt": "bestaudio/best", "impersonate": "safari"},
@@ -148,7 +150,8 @@ def download_youtube(url, dst_dir, song_id):
         {"name": "tv",            "clients": ["tv"],            "fmt": "bestaudio/best"},
         {"name": "tv_embedded",   "clients": ["tv_embedded"],   "fmt": "bestaudio/best"},
         {"name": "web_embedded",  "clients": ["web_embedded"],  "fmt": "bestaudio/best"},
-        {"name": "web",           "clients": ["web"],           "fmt": "bestaudio/best"},
+        {"name": "web",            "clients": ["web"],           "fmt": "bestaudio/best"},
+        {"name": "default-2",      "clients": None,              "fmt": "best"},
     ]
 
     def _cleanup():
@@ -170,8 +173,10 @@ def download_youtube(url, dst_dir, song_id):
             "socket_timeout": 30,
             "retries": 2,
             "extractor_retries": 1,
-            "extractor_args": {"youtube": {"player_client": st["clients"]}},
         }
+        # solo forzar clientes cuando la estrategia lo pide ("default" no fuerza)
+        if st.get("clients"):
+            opts["extractor_args"] = {"youtube": {"player_client": st["clients"]}}
         if st.get("impersonate") and ImpersonateTarget is not None:
             try:
                 opts["impersonate"] = ImpersonateTarget.from_str(st["impersonate"])
@@ -198,6 +203,7 @@ def download_youtube(url, dst_dir, song_id):
             last_err = str(e)[:200]
             print(f"[yt] estrategia {st['name']} falló: {last_err}", flush=True)
             _cleanup()
+            time.sleep(2)  # pausa anti-throttling antes de la próxima estrategia
             continue
     _cleanup()
     raise RuntimeError(
