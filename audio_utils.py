@@ -139,6 +139,7 @@ def download_youtube(url, dst_dir, song_id):
     # como respaldo por si YouTube vuelve a cambiar.
     strategies = [
         {"name": "default",        "clients": None,               "fmt": "bestaudio/best"},
+        {"name": "default-anon",   "clients": None,               "fmt": "bestaudio/best", "nocookie": True},
         {"name": "web-imp",       "clients": ["web"],           "fmt": "bestaudio/best", "impersonate": "chrome"},
         {"name": "web-imp-v",     "clients": ["web"],           "fmt": "best",           "impersonate": "chrome"},
         {"name": "safari-imp",    "clients": ["web_safari"],    "fmt": "bestaudio/best", "impersonate": "safari"},
@@ -152,6 +153,7 @@ def download_youtube(url, dst_dir, song_id):
         {"name": "web_embedded",  "clients": ["web_embedded"],  "fmt": "bestaudio/best"},
         {"name": "web",            "clients": ["web"],           "fmt": "bestaudio/best"},
         {"name": "default-2",      "clients": None,              "fmt": "best"},
+        {"name": "default-2-anon", "clients": None,              "fmt": "best", "nocookie": True},
     ]
 
     def _cleanup():
@@ -182,9 +184,10 @@ def download_youtube(url, dst_dir, song_id):
                 opts["impersonate"] = ImpersonateTarget.from_str(st["impersonate"])
             except Exception:
                 pass
-        ck = _yt_cookies_file()
-        if ck:
-            opts["cookiefile"] = ck
+        if not st.get("nocookie"):
+            ck = _yt_cookies_file()
+            if ck:
+                opts["cookiefile"] = ck
         print(f"[yt] probando estrategia {st['name']}...", flush=True)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
