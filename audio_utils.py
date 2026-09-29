@@ -175,6 +175,9 @@ def download_youtube(url, dst_dir, song_id):
             "socket_timeout": 30,
             "retries": 2,
             "extractor_retries": 1,
+            # solver de desafíos JS de YouTube (requiere deno en PATH y
+            # descarga el solver desde GitHub la primera vez)
+            "remote_components": ["ejs:github"],
         }
         # solo forzar clientes cuando la estrategia lo pide ("default" no fuerza)
         if st.get("clients"):
