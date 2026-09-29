@@ -40,7 +40,7 @@ for d in (AUDIO_DIR, WAV_DIR, RENDER_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-VERSION = "v41"  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v40: default sin forzar clientes; v41: PO Token bgutil + deno + remote_components)  # marca de versión: aparece en /api/health y en el footer para verificar el deploy (v39: CORS + cookies; v40: estrategia default sin clientes forzados)
+VERSION = "v42"  # marca de versión: aparece en /api/health y en el footer (v41: PO Token bgutil + deno + remote_components; v42: diagnóstico yt en /api/health)
 ALIGN_VERSION = 3  # versión del pipeline de alineación: si una canción lista tiene
                    # align_v != 3, se re-analiza sola al arrancar (anclas dispersas corregidas)
 
@@ -372,10 +372,31 @@ def index():
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ---------------------------------------------------------------- canciones
+def _yt_diag():
+    """Diagnóstico del entorno de descarga de YouTube (para /api/health)."""
+    import shutil, socket
+    d = {}
+    try:
+        d["cwd"] = os.getcwd()
+        d["home"] = os.environ.get("HOME")
+        d["deno_en_path"] = shutil.which("deno")
+        d["deno_local"] = os.path.exists(".deno/bin/deno")
+        d["bgutil_repo"] = os.path.isdir("bgutil-ytdlp-pot-provider/server/node_modules")
+        try:
+            c = socket.create_connection(("127.0.0.1", 4416), timeout=1.5)
+            c.close()
+            d["pot_server_4416"] = "vivo"
+        except Exception as e:
+            d["pot_server_4416"] = f"caido ({type(e).__name__})"
+    except Exception as e:
+        d["error"] = str(e)[:120]
+    return d
+
+
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
     storage = "github" if ghstore.enabled() else ("r2" if cloud.cloud_enabled() else "local")
-    return {"ok": True, "model": _pick_model(), "storage": storage, "version": VERSION}
+    return {"ok": True, "model": _pick_model(), "storage": storage, "version": VERSION, "yt_diag": _yt_diag()}
 
 @app.get("/api/songs")
 def list_songs():

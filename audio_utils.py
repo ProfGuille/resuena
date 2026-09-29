@@ -169,8 +169,8 @@ def download_youtube(url, dst_dir, song_id):
         opts = {
             "format": st["fmt"],
             "outtmpl": outtmpl,
-            "quiet": True,
-            "no_warnings": True,
+            "quiet": not os.environ.get("YT_DEBUG"),
+            "no_warnings": not os.environ.get("YT_DEBUG"),
             "noplaylist": True,
             "socket_timeout": 30,
             "retries": 2,
