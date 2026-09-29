@@ -52,6 +52,66 @@ def to_streaming_mp3(src, dst):
         raise RuntimeError("ffmpeg: no se pudo convertir a mp3: " + r.stderr[-300:])
 
 
+def _yt_cookies_file():
+    """(v39) Cookies de YouTube desde la variable de entorno YT_COOKIES.
+
+    YouTube bloquea con 403 las IPs de datacenter (Render) si la petición
+    no viene de una sesión logueada. Con cookies de una cuenta de YouTube,
+    yt-dlp pasa el chequeo anti-bot.
+
+    Acepta TRES formatos (el que salga más fácil copiar):
+      1. El contenido de un cookies.txt Netscape (con tabs).
+      2. La línea cruda "Cookie:" del DevTools del navegador (F12 -> Network
+         -> clic a cualquier request de youtube.com -> Request Headers ->
+         copiar el valor de "Cookie"): "SID=xxx; HSID=yyy; ...".
+      3. Líneas simples "NOMBRE=VALOR" (una por línea).
+    En los casos 2 y 3 se arma el formato Netscape automáticamente.
+    Devuelve la ruta del archivo o None si no hay cookies configuradas.
+    """
+    global _yt_cookies_path
+    raw = (os.environ.get("YT_COOKIES") or "").strip()
+    if not raw:
+        return None
+    if _yt_cookies_path and os.path.exists(_yt_cookies_path):
+        return _yt_cookies_path
+    import tempfile
+    try:
+        lines = []
+        if "\t" in raw:
+            # formato Netscape ya listo
+            body = raw.replace("\\n", "\n").splitlines()
+            lines = [l for l in body if l.strip() and not l.startswith("#")]
+        else:
+            # crudo: "a=b; c=d" (header Cookie) o líneas "a=b"
+            txt = raw.replace("Cookie:", " ").replace("cookie:", " ")
+            pairs = [p.strip() for p in txt.replace("\n", ";").split(";")]
+            for p in pairs:
+                if "=" not in p:
+                    continue
+                name, _, val = p.partition("=")
+                name = name.strip()
+                val = val.strip()
+                if not name or not val:
+                    continue
+                # dominio, incluir_subdominios, path, secure, expira, nombre, valor
+                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t1999999999\t{name}\t{val}")
+        if not lines:
+            print("[yt] YT_COOKIES no contenida cookies reconocibles", flush=True)
+            return None
+        p = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("# Netscape HTTP Cookie File\n")
+            fh.write("\n".join(lines) + "\n")
+        _yt_cookies_path = p
+        print(f"[yt] cookies de YouTube cargadas desde YT_COOKIES ({len(lines)} cookies)", flush=True)
+        return p
+    except Exception as e:
+        print("[yt] no se pudieron escribir las cookies:", str(e)[:120], flush=True)
+        return None
+
+_yt_cookies_path = None
+
+
 def download_youtube(url, dst_dir, song_id):
     """Descarga el audio de un video de YouTube con yt-dlp, probando varias
     estrategias (cliente web, android, tv, mweb, con impersonación de Chrome)
@@ -117,27 +177,36 @@ def download_youtube(url, dst_dir, song_id):
                 opts["impersonate"] = ImpersonateTarget.from_str(st["impersonate"])
             except Exception:
                 pass
+        ck = _yt_cookies_file()
+        if ck:
+            opts["cookiefile"] = ck
+        print(f"[yt] probando estrategia {st['name']}...", flush=True)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
             path = ydl.prepare_filename(info)
             if os.path.exists(path):
+                print(f"[yt] OK con estrategia {st['name']}", flush=True)
                 return path, info.get("title"), info.get("uploader")
             base = os.path.splitext(path)[0]
             for ext in (".webm", ".m4a", ".mp3", ".opus", ".mp4"):
                 cand = base + ext
                 if os.path.exists(cand):
+                    print(f"[yt] OK con estrategia {st['name']} (ext {ext})", flush=True)
                     return cand, info.get("title"), info.get("uploader")
         except Exception as e:
             last_err = str(e)[:200]
+            print(f"[yt] estrategia {st['name']} falló: {last_err}", flush=True)
             _cleanup()
             continue
     _cleanup()
     raise RuntimeError(
         "YouTube bloqueó la descarga de este video desde el servidor "
-        "(HTTP 403/Forbidden). Puede ser temporal o depender del video/link. "
-        "Probá: 1) volver a intentar, 2) usar otro link del mismo tema, o "
-        "3) subir el archivo de audio directamente (siempre funciona)."
+        "(IP de datacenter sin sesión). Probá: 1) volver a intentar, "
+        "2) usar otro link del mismo tema, o 3) subir el archivo de audio "
+        "directamente (siempre funciona). Si el problema persiste, el dueño "
+        "del servicio puede configurar la variable YT_COOKIES con cookies "
+        "de una cuenta de YouTube (ver README)."
         + (f" Detalle: {last_err}" if last_err else "")
     )
 
